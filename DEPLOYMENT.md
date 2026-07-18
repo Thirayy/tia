@@ -1,6 +1,11 @@
 # TIA VPS Deployment
 
-Panduan ini mengasumsikan:
+Panduan ini mengasumsikan struktur VPS panel:
+
+- Backend ada di `/home/TIA/tia-server`.
+- Frontend ada di `/home/TIA/web/tia.khwarizmi.co.id/public_html/tia-app`.
+
+Service runtime:
 
 - Backend FastAPI berjalan di `127.0.0.1:8000`.
 - Frontend Next.js berjalan di `127.0.0.1:3002`.
@@ -10,7 +15,7 @@ Panduan ini mengasumsikan:
 ## 1. Backend
 
 ```bash
-cd /path/to/tia
+cd /home/TIA/tia-server
 python3 -m venv venv
 venv/bin/python -m pip install -r requirements.txt
 ```
@@ -34,7 +39,7 @@ curl -i http://127.0.0.1:8000/docs
 ## 2. Frontend
 
 ```bash
-cd /path/to/tia-app
+cd /home/TIA/web/tia.khwarizmi.co.id/public_html/tia-app
 npm ci
 BACKEND_URL='http://127.0.0.1:8000' NEXT_PUBLIC_API_URL='' npm run build
 npm run start -- --hostname 127.0.0.1 --port 3002
@@ -49,12 +54,12 @@ curl -i http://127.0.0.1:3002/api/docs
 
 ## 3. PM2
 
-Jalankan PM2 dari folder backend, sambil memberi tahu lokasi frontend:
+Jalankan PM2 dari folder backend:
 
 ```bash
-cd /path/to/tia
-TIA_BACKEND_DIR=/path/to/tia \
-TIA_FRONTEND_DIR=/path/to/tia-app \
+cd /home/TIA/tia-server
+TIA_BACKEND_DIR=/home/TIA/tia-server \
+TIA_FRONTEND_DIR=/home/TIA/web/tia.khwarizmi.co.id/public_html/tia-app \
 DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/tia_db' \
 FRONTEND_URL='https://tia.khwarizmi.co.id' \
 COOKIE_DOMAIN='tia.khwarizmi.co.id' \

@@ -1,7 +1,12 @@
+const fs = require("fs");
 const path = require("path");
 
 const backendDir = process.env.TIA_BACKEND_DIR || __dirname;
-const frontendDir = process.env.TIA_FRONTEND_DIR || path.resolve(__dirname, "../tia-app");
+const panelFrontendDir = path.resolve(backendDir, "../web/tia.khwarizmi.co.id/public_html/tia-app");
+const localFrontendDir = path.resolve(backendDir, "../tia-app");
+const frontendDir = process.env.TIA_FRONTEND_DIR || (
+  fs.existsSync(panelFrontendDir) ? panelFrontendDir : localFrontendDir
+);
 const frontendUrl = process.env.FRONTEND_URL || "https://tia.khwarizmi.co.id";
 const cookieDomain = process.env.COOKIE_DOMAIN || "tia.khwarizmi.co.id";
 const backendUrl = process.env.BACKEND_URL || "http://127.0.0.1:8000";
