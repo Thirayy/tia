@@ -1,5 +1,8 @@
+from datetime import datetime
 from typing import Optional, List
 from sqlmodel import Field, Relationship, SQLModel
+
+from app.timezone import now_indonesia
 
 # ==========================================
 # 1. TABEL USER (Admin & Musyrif)
@@ -12,6 +15,7 @@ class User(SQLModel, table=True):
     password_hash: str = Field(nullable=False)
     nama_lengkap: str = Field(nullable=False)
     role: str = Field(default="musyrif", nullable=False) # Isinya: 'admin' atau 'musyrif'
+    created_at: Optional[datetime] = Field(default_factory=now_indonesia)
 
     # Relasi back-population: Satu musyrif mengelola satu kelompok halaqah
     kelompok: Optional["KelompokHalaqah"] = Relationship(back_populates="musyrif")
@@ -65,6 +69,7 @@ class SetoranTahfizh(SQLModel, table=True):
     ayat: str = Field(nullable=False)  # Misal: "1-10"
     status_kelancaran: str = Field(nullable=False) # Isinya: 'lancar', 'sedang', 'kurang'
     catatan_musyrif: Optional[str] = Field(default=None) # Catatan manual ustadz
+    created_at: Optional[datetime] = Field(default_factory=now_indonesia)
     
     # Kolom Sakti: Output Analisis dari Llama 3
     ai_rekomendasi: Optional[str] = Field(default=None)

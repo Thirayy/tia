@@ -4,8 +4,10 @@ from sqlmodel import Session, select
 from pydantic import BaseModel
 from app.database import get_session
 from app.models import User
+from app.security import hash_password, is_password_hash, verify_password
 
-COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", "tia.khwarizmi.co.id")
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN")
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 
 router = APIRouter()
 
@@ -19,22 +21,29 @@ class LoginRequest(BaseModel):
 @router.post("/login")
 async def login(data: LoginRequest, response: Response, session: Session = Depends(get_session)):
     # Cari user berdasarkan username
-    user = session.query(User).filter(User.username == data.username).first()
+    user = session.exec(select(User).where(User.username == data.username)).first()
     
     # Validasi user dan password
-    if not user or user.password_hash != data.password:
+    if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Username atau password salah!")
 
+    if not is_password_hash(user.password_hash):
+        user.password_hash = hash_password(data.password)
+        session.add(user)
+        session.commit()
+
     # Set Session Cookie
-    response.set_cookie(
-        key="session_user",
-        value=user.username,
-        httponly=True,
-        samesite="lax",
-        secure=True, 
-        domain=COOKIE_DOMAIN,
-        max_age=86400
-    )
+    cookie_options = {
+        "key": "session_user",
+        "value": user.username,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": COOKIE_SECURE,
+        "max_age": 86400,
+    }
+    if COOKIE_DOMAIN:
+        cookie_options["domain"] = COOKIE_DOMAIN
+    response.set_cookie(**cookie_options)
     
     # Return respons sukses
     return {
@@ -54,7 +63,10 @@ async def login(data: LoginRequest, response: Response, session: Session = Depen
 # ==========================================
 @router.post("/logout")
 async def logout(response: Response):
-    response.delete_cookie(key="session_user")
+    delete_options = {"key": "session_user"}
+    if COOKIE_DOMAIN:
+        delete_options["domain"] = COOKIE_DOMAIN
+    response.delete_cookie(**delete_options)
     return {"status": "success", "message": "Berhasil logout!"}
 
 # ==========================================

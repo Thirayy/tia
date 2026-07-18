@@ -44,6 +44,10 @@ class SetoranCreate(BaseModel):
     catatan_musyrif: Optional[str] = ""
 
 
+def get_session_username(request: Request, session_user: Optional[str] = None) -> Optional[str]:
+    return session_user or request.headers.get("x-session-user") or request.cookies.get("x-session-user")
+
+
 # ==========================================
 # DEPENDENCY: Ambil Session via HEADER (Fix 401 & 403)
 # ==========================================
@@ -76,7 +80,7 @@ def get_all_santri(
     session_user: str = Cookie(None)
 ):
     # 🔥 FIX: Gunakan header untuk otentikasi session, fallback ke cookie kalau frontend belum kirim header
-    username = session_user or request.headers.get("x-session-user") or request.cookies.get("x-session-user")
+    username = get_session_username(request, session_user)
     if not username:
         raise HTTPException(status_code=401, detail="Belum login!")
     
@@ -124,16 +128,18 @@ def get_all_santri(
 
 @router.post("/setoran")
 async def input_setoran(
+    request: Request,
     data: SetoranCreate,
     session: Session = Depends(get_session),
     session_user: Optional[str] = Cookie(None) 
 ):
     # 1. Validasi session
-    if not session_user:
+    username = get_session_username(request, session_user)
+    if not username:
         raise HTTPException(status_code=401, detail="Session expired atau tidak login")
 
     # 2. Ambil user & santri
-    user = session.exec(select(User).where(User.username == session_user)).first()
+    user = session.exec(select(User).where(User.username == username)).first()
     santri = session.exec(select(Santri).where(Santri.id == data.santri_id)).first()
     
     if not user:

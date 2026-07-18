@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from sqlmodel import Session, select, SQLModel, Field, create_engine
 from app.database import engine, get_session # Pastiin file database.py ada engine-nya
 
