@@ -1,9 +1,8 @@
 
 #!/bin/bash
+set -euo pipefail
 
-cd /home/tia.khwarizmi.co.id/tia-server || exit 1
+BACKEND_DIR="${TIA_BACKEND_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+cd "$BACKEND_DIR"
 
-exec /home/tia.khwarizmi.co.id/tia-server/venv/bin/python \
-  -m uvicorn main:app \
-  --host 127.0.0.1 \
-  --port 8000
+exec "$BACKEND_DIR/venv/bin/python" -m uvicorn main:app --host 127.0.0.1 --port 8000
