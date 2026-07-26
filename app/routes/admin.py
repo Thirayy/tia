@@ -499,3 +499,107 @@ def change_musyrif_role(user_id: int, payload: UpdateRolePayload, session: Sessi
         "message": f"⚡ Berhasil ganti role {user.nama_lengkap} jadi {payload.role.upper()}!",
         "data": {"id": user.id, "username": user.username, "role": user.role}
     }
+
+# ==========================================
+# 12. GET HISTORI LAPORAN PER HALAQAH (TANPA LIMIT!)
+# ==========================================
+@router.get("/halaqah/{kelompok_id}/laporan")
+def get_laporan_per_halaqah(
+    kelompok_id: int, 
+    session: Session = Depends(get_session), 
+    admin: User = Depends(get_current_admin)
+):
+    try:
+        # HAPUS .limit() BIAR DITAMPILIN SEMUA HISTORI TANPA BATAS
+        statement = (
+            select(SetoranTahfizh, Santri)
+            .join(Santri, SetoranTahfizh.santri_id == Santri.id)
+            .where(Santri.kelompok_id == kelompok_id)
+            .order_by(SetoranTahfizh.id.desc())
+        )
+        
+        results = session.exec(statement).all()
+        
+        laporan_list = []
+        for setoran, santri in results:
+            laporan_list.append({
+                "id_setoran": setoran.id,
+                "nama_santri": santri.nama_santri,
+                "surah": setoran.surah,
+                "ayat": setoran.ayat,
+                "status_kelancaran": setoran.status_kelancaran,
+                "catatan_musyrif": getattr(setoran, 'catatan_musyrif', None),
+                "ai_rekomendasi": getattr(setoran, 'ai_rekomendasi', None),
+                "waktu_setoran": format_indonesia(getattr(setoran, 'created_at', None))
+            })
+            
+        return {"status": "success", "total_data": len(laporan_list), "data": laporan_list}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal narik histori laporan: {str(e)}")
+
+
+# ==========================================
+# 14. GET PROFILE USER / MUSYRIF (Lengkap + Histori Tanpa Limit)
+# ==========================================
+@router.get("/musyrif/{user_id}/profile")
+def get_profile_musyrif(
+    user_id: int, 
+    session: Session = Depends(get_session), 
+    admin: User = Depends(get_current_admin)
+):
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User / Musyrif tidak ditemukan")
+
+    # Cari halaqah/kelompok yang dipegang
+    kelompok_list = session.exec(
+        select(KelompokHalaqah).where(KelompokHalaqah.musyrif_id == user.id)
+    ).all()
+
+    kelompok_ids = [k.id for k in kelompok_list]
+
+    # Hitung total santri binaan
+    total_santri = 0
+    if kelompok_ids:
+        total_santri = session.exec(
+            select(func.count(Santri.id)).where(Santri.kelompok_id.in_(kelompok_ids))
+        ).one()
+
+    # Histori Seluruh Setoran yang Diampu Musyrif ini (TANPA LIMIT)
+    histori_setoran = []
+    if kelompok_ids:
+        statement = (
+            select(SetoranTahfizh, Santri)
+            .join(Santri, SetoranTahfizh.santri_id == Santri.id)
+            .where(Santri.kelompok_id.in_(kelompok_ids))
+            .order_by(SetoranTahfizh.id.desc())
+        )
+        results = session.exec(statement).all()
+        for s, santri in results:
+            histori_setoran.append({
+                "id_setoran": s.id,
+                "santri_id": santri.id,
+                "nama_santri": santri.nama_santri,
+                "surah": s.surah,
+                "ayat": s.ayat,
+                "status_kelancaran": s.status_kelancaran,
+                "catatan_musyrif": getattr(s, 'catatan_musyrif', ''),
+                "waktu_setoran": format_indonesia(getattr(s, 'created_at', None))
+            })
+
+    return {
+        "status": "success",
+        "profile": {
+            "id": user.id,
+            "username": user.username,
+            "nama_lengkap": user.nama_lengkap,
+            "role": user.role,
+            "tanggal_dibuat": format_indonesia(getattr(user, "created_at", None), "%d/%m/%Y") if getattr(user, "created_at", None) else "-",
+            "total_kelompok": len(kelompok_list),
+            "kelompok_diampu": [k.nama_kelompok for k in kelompok_list],
+            "total_santri_binaan": total_santri,
+            "total_setoran_diampu": len(histori_setoran)
+        },
+        "histori_setoran_full": histori_setoran
+    }

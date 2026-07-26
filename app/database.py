@@ -4,21 +4,13 @@ from fastapi import Depends
 from sqlalchemy import inspect, text
 from typing import Generator
 
-# =========================================================================
-# KONEKSI DATABASE POSTGRESQL
-# Format: postgresql://username:password@localhost:50000/nama_db
-# 💡 Tips: Silahkan ganti username, password, port, dan nama_db sesuai settingan lokal
-# =========================================================================
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:Admin12345@localhost:5432/tia_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Admin12345@localhost:5432/tia_db")
 
-# Buat engine koneksi
-engine = create_engine(DATABASE_URL, echo=True) # echo=True biar bisa liat log query SQL asli di terminal pas testing
+engine = create_engine(DATABASE_URL, echo=True)
 
-# Fungsi untuk inisialisasi tabel otomatis pas aplikasi pertama kali jalan
 def init_db():
     SQLModel.metadata.create_all(engine)
     ensure_runtime_columns()
-
 
 def ensure_runtime_columns():
     inspector = inspect(engine)
@@ -26,6 +18,7 @@ def ensure_runtime_columns():
     timestamp_tables = ("users", "setoran_tahfizh")
 
     with engine.begin() as connection:
+        # 1. Handling created_at timestamp
         for table_name in timestamp_tables:
             if table_name not in existing_tables:
                 continue
@@ -36,7 +29,16 @@ def ensure_runtime_columns():
                     text(f"ALTER TABLE {table_name} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 )
 
-# Dependency untuk inject DB Session ke endpoint FastAPI
+        # 2. Migration safety check untuk quran_verses
+        if "quran_verses" in existing_tables:
+            quran_columns = {column["name"] for column in inspector.get_columns("quran_verses")}
+            if "page_number" not in quran_columns:
+                connection.execute(text("ALTER TABLE quran_verses ADD COLUMN page_number INTEGER DEFAULT 1"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_quran_verses_page_number ON quran_verses (page_number)"))
+            if "juz_number" not in quran_columns:
+                connection.execute(text("ALTER TABLE quran_verses ADD COLUMN juz_number INTEGER DEFAULT 1"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_quran_verses_juz_number ON quran_verses (juz_number)"))
+
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session

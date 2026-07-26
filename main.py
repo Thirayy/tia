@@ -1,9 +1,12 @@
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.routes import auth, admin, musyrif
 from app.routes.musyrif import router as musyrif_router
-import os
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 
 app = FastAPI(
     title="TIA - Tahfizh Integrated Assessment",

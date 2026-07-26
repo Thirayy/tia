@@ -5,7 +5,25 @@ from sqlmodel import Field, Relationship, SQLModel
 from app.timezone import now_indonesia
 
 # ==========================================
-# 1. TABEL USER (Admin & Musyrif)
+# 1. TABEL QURAN VERSES (RAG Reference Data)
+# ==========================================
+class QuranVerse(SQLModel, table=True):
+    __tablename__ = "quran_verses"
+    __table_args__ = {"extend_existing": True}
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    surah_id: int = Field(index=True)          # 1 - 114
+    surah_name: str                            # Al-Baqarah, dll
+    ayah_number: int = Field(index=True)       # Nomor ayat dalam surah
+    page_number: int = Field(index=True)       # Halaman Mushaf Standar Madani (1 - 604)
+    juz_number: int = Field(index=True)        # Juz (1 - 30)
+    text_arabic: str                           # Teks Arab
+    text_id: str                               # Terjemahan Indonesia
+    tafsir_wajiz: Optional[str] = Field(default=None) # Tafsir Ringkas Kemenag
+
+
+# ==========================================
+# 2. TABEL USER (Admin & Musyrif)
 # ==========================================
 class User(SQLModel, table=True):
     __tablename__ = "users"
@@ -17,12 +35,12 @@ class User(SQLModel, table=True):
     role: str = Field(default="musyrif", nullable=False) # Isinya: 'admin' atau 'musyrif'
     created_at: Optional[datetime] = Field(default_factory=now_indonesia)
 
-    # Relasi back-population: Satu musyrif mengelola satu kelompok halaqah
+    # Relasi back-population
     kelompok: Optional["KelompokHalaqah"] = Relationship(back_populates="musyrif")
 
 
 # ==========================================
-# 2. TABEL KELOMPOK HALAQAH (Mapping Jembatan)
+# 3. TABEL KELOMPOK HALAQAH
 # ==========================================
 class KelompokHalaqah(SQLModel, table=True):
     __tablename__ = "kelompok_halaqah"
@@ -30,46 +48,53 @@ class KelompokHalaqah(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     nama_kelompok: str = Field(unique=True, nullable=False) # Misal: "Halaqah Abu Bakar"
     
-    # Foreign Key ke tabel users (siapa musyrifnya)
     musyrif_id: Optional[int] = Field(default=None, foreign_key="users.id")
 
-    # Relasi penghubung ke model User dan Santri
     musyrif: Optional[User] = Relationship(back_populates="kelompok")
     santri_list: List["Santri"] = Relationship(back_populates="kelompok")
 
 
 # ==========================================
-# 3. TABEL SANTRI (Anak Didik)
+# 4. TABEL SANTRI (Anak Didik)
 # ==========================================
 class Santri(SQLModel, table=True):
     __tablename__ = "santri"
     
     id: Optional[int] = Field(default=None, primary_key=True)
     nama_santri: str = Field(nullable=False)
-    nomor_induk: str = Field(unique=True, nullable=False) # Misal: NISN / Nomor Induk Pondok
-    status_santri: str = Field(default="aktif", nullable=False) # Isinya: 'aktif' atau 'alumni'
+    nomor_induk: str = Field(unique=True, nullable=False) # NISN / Nomor Induk
+    status_santri: str = Field(default="aktif", nullable=False) # 'aktif' / 'alumni'
     
-    # Foreign Key ke kelompok halaqah tempat dia belajar
     kelompok_id: Optional[int] = Field(default=None, foreign_key="kelompok_halaqah.id")
 
-    # Relasi back-population ke kelompok
     kelompok: Optional[KelompokHalaqah] = Relationship(back_populates="santri_list")
 
+
 # ==========================================
-# 4. TABEL SETORAN TAHFIZH (Histori & AI Assessment)
+# 5. TABEL SETORAN TAHFIZH
 # ==========================================
 class SetoranTahfizh(SQLModel, table=True):
     __tablename__ = "setoran_tahfizh"
-    
     id: Optional[int] = Field(default=None, primary_key=True)
     santri_id: int = Field(foreign_key="santri.id", nullable=False)
     
-    # Detail Setoran
-    surah: str = Field(nullable=False) # Misal: "Al-Baqarah"
-    ayat: str = Field(nullable=False)  # Misal: "1-10"
-    status_kelancaran: str = Field(nullable=False) # Isinya: 'lancar', 'sedang', 'kurang'
-    catatan_musyrif: Optional[str] = Field(default=None) # Catatan manual ustadz
+    surah: str = Field(nullable=False)
+    ayat: str = Field(nullable=False)
+    status_kelancaran: str = Field(nullable=False)
+    catatan_musyrif: Optional[str] = Field(default=None)
     created_at: Optional[datetime] = Field(default_factory=now_indonesia)
     
-    # Kolom Sakti: Output Analisis dari Llama 3
     ai_rekomendasi: Optional[str] = Field(default=None)
+
+# ==========================================
+# 6. TABEL QURAN KNOWLEDGE
+# ==========================================
+class QuranKnowledge(SQLModel, table=True):
+    __tablename__ = "quran_knowledge"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    kategori: str
+    sub_kategori: str
+    nama_parameter: str
+    referensi_ayat: str
+    teks_mentah_penjelasan: str

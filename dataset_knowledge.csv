@@ -1,0 +1,18 @@
+Kategori,Sub_Kategori,Nama_Parameter,Referensi_Ayat,Teks_Mentah_Penjelasan
+Tajwid,Hukum Nun Mati & Tanwin,Idzhar Halqi,QS. Al-Baqarah: 6,"Membaca Nun sukun (نْ) atau tanwin dengan jelas dan terang tanpa dengung (ghunnah) apabila bertemu dengan salah satu dari 6 huruf tenggorokan: Hamzah (ء), Ha (هـ), 'Ain (ع), Ha (ح), Ghain (غ), Kha (خ)."
+Tajwid,Hukum Nun Mati & Tanwin,Idgham Bighunnah,QS. Al-Lahab: 1,"Memasukkan suara Nun sukun atau tanwin ke dalam huruf berikutnya disertai dengung selama 2 harakat jika bertemu huruf Ya (ي), Nun (ن), Mim (م), Wawu (و)."
+Tajwid,Hukum Nun Mati & Tanwin,Idgham Bilaghunnah,QS. Al-Ikhlas: 4,Memasukkan suara Nun sukun atau tanwin ke dalam huruf Lam (ل) atau Ra (ر) secara sempurna TANPA disertai dengung.
+Tajwid,Hukum Nun Mati & Tanwin,Iqlab,QS. Al-Baqarah: 18,Mengubah suara Nun sukun atau tanwin menjadi suara Mim (م) yang samar disertai dengung 2 harakat ketika bertemu huruf Ba (ب).
+Tajwid,Hukum Nun Mati & Tanwin,Ikhfa Haqiqi,QS. Al-Falaq: 2,"Menyamarkan suara Nun sukun atau tanwin antara bacaan Idzhar dan Idgham disertai dengung jika bertemu 15 huruf Ikhfa (ت, ث, ج, د, ذ, ز, س, ش, ص, ض, ط, ظ, ف, ق, ك)."
+Tajwid,Hukum Mim Mati,Ikhfa Syafawi,QS. Al-Fil: 4,Menyamarkan suara Mim sukun (مْ) disertai dengung di kedua bibir apabila bertemu dengan huruf Ba (ب).
+Tajwid,Hukum Mim Mati,Idgham Mutamatsilain / Idgham Mimi,QS. Quraysh: 4,Memasukkan suara Mim sukun ke dalam huruf Mim berikutnya sehingga menjadi bertasydid dan didengungkan 2 harakat.
+Tajwid,Hukum Mim Mati,Idzhar Syafawi,QS. Al-Fatihah: 7,Membaca Mim sukun dengan jelas di bibir tanpa dengung apabila bertemu seluruh huruf hijaiyah selain Ba (ب) dan Mim (م).
+Tajwid,Hukum Mad,Mad Thabi'i (Mad Asli),QS. Al-Fatihah: 1,"Membaca panjang 2 harakat pada huruf Alif setelah fathah, Wawu sukun setelah dhammad, atau Ya sukun setelah kasrah."
+Tajwid,Hukum Mad,Mad Wajib Muttashil,QS. An-Nasr: 1,Mad Thabi'i bertemu dengan Hamzah (ء) dalam SATU KATA. Panjang bacaan adalah 4 atau 5 harakat.
+Tajwid,Hukum Mad,Mad Jaiz Munfashil,QS. Al-Kautsar: 1,"Mad Thabi'i bertemu dengan Hamzah (ء) pada KATA YANG BERBEDA. Panjang bacaan dibaca 2, 4, atau 5 harakat."
+Tajwid,Hukum Mad,Mad 'Arid Lissukun,QS. Al-Fatihah: 2,"Mad Thabi'i bertemu huruf hijaiyah hidup yang dibaca sukun karena diwakafkan (berhenti). Panjangnya 2, 4, atau 6 harakat."
+Evaluasi Tahfizh,Kelancaran Setoran,Lupa Ayat / Terhenti (Tawaqquf),QS. Al-A'la: 6,Kondisi di mana santri terhenti membaca lebih dari 3-5 detik. Penguji memberikan pancingan (fath) maksimal 2-3 kata awal ayat.
+Evaluasi Tahfizh,Kelancaran Setoran,Ayat Tertukar (Tasyabuh),QS. Al-Kafirun: 3-5,Kesalahan di mana santri melompat atau berpindah ke ayat/surah lain yang memiliki kemiripan bunyi (mutasyabihat).
+Evaluasi Tahfizh,Kelancaran Setoran,Salah Harakat (Lahn Jali),QS. Al-Fatihah: 7,Kesalahan fatal berupa perubahan harakat atau huruf yang dapat merubah arti ayat. Harus segera dikoreksi oleh penguji.
+Makhraj Huruf,Al-Halq (Tenggorokan),Aqshal Halq (Tenggorokan Bawah),QS. Al-Ikhlas: 1,Tempat keluar huruf Hamzah (ء) dan Ha (هـ) dari pangkal tenggorokan paling dalam dekat dada.
+Makhraj Huruf,Al-Halq (Tenggorokan),Washat Halq (Tenggorokan Tengah),QS. Al-Fatihah: 1,Tempat keluar huruf 'Ain (ع) dan Ha (ح) dari bagian tengah tenggorokan.
