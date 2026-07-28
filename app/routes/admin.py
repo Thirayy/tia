@@ -1,39 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlmodel import Session, select, SQLModel, Field, text, delete
+from sqlmodel import Session, select, SQLModel, Field, delete
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-from sqlalchemy import func, text
-from app.models import Santri, KelompokHalaqah, User, SetoranTahfizh
+from sqlalchemy import func
+
+from app.models import Santri, KelompokHalaqah, User, SetoranTahfizh, HalaqahDisruption
 from app.timezone import now_indonesia, format_indonesia
 from app.security import hash_password
-
-# Pastikan import engine untuk auto-create tabel baru
 from app.database import get_session, engine 
-from app.models import User, KelompokHalaqah, Santri
 
 router = APIRouter()
 
-# ==========================================
-# 0. MODEL BARU: LOG DISRUPSI (AUTO CREATE)
-# ==========================================
-class HalaqahDisruption(SQLModel, table=True):
-    __tablename__ = "halaqah_disruptions"
-    
-    id: Optional[int] = Field(default=None, primary_key=True)
-    tanggal: datetime = Field(default_factory=now_indonesia)
-    kelompok_id: int
-    musyrif_id: int          # Musyrif asli yang berhalangan
-    badal_musyrif_id: Optional[int] = None # Musyrif pengganti (kalau ada)
-    alasan: str              # Contoh: "Rapat Guru Bahasa Urgent"
-    status_halaqah: str      # "diganti_badal" atau "diliburkan_total"
-
-# BIAR OP & ANTI-ERROR: Langsung ciptakan tabel di Postgres kalau belum ada!
+# Auto create tabel baru jika belum ada
 SQLModel.metadata.create_all(engine)
 
 
 # ==========================================
-# DEPENDENCY SAKTI: ANTI-401 & ANTI-403 BYPASS AUTO-CREATE ADMIN
+# DEPENDENCY: AUTH ADMIN
 # ==========================================
 def get_current_admin(request: Request, session: Session = Depends(get_session)):
     username = request.cookies.get("session_user") or request.headers.get("x-session-user")
@@ -56,20 +40,19 @@ def get_current_admin(request: Request, session: Session = Depends(get_session))
     raise HTTPException(status_code=401, detail="Belum login sebagai admin.")
 
 
+# ==========================================
+# 1. OVERVIEW DASHBOARD
+# ==========================================
 @router.get("/overview")
 async def get_dashboard_overview(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     try:
-        # 1. Total Ustadz & Santri
         total_ustadz = len(session.exec(select(User).where(User.role == "musyrif")).all())
         semua_santri = session.exec(select(Santri)).all()
         total_santri = len(semua_santri)
-        santri_aktif = len([s for s in semua_santri if getattr(s, 'status_santri', 'aktif') == 'aktif'])
+        santri_aktif = len([s for s in semua_santri if getattr(s, 'status_santri', 'hadir') == 'hadir'])
         
-        # 2. NGAMBIL DATA ASLI (Ganti hardcode 50 jadi hitungan real)
         total_laporan = session.exec(select(func.count(SetoranTahfizh.id))).one()
         
-        # Untuk grafik, sementara kita hitung total saja, 
-        # nanti bisa di-group by tanggal kalau mau lebih advance
         return {
             "status": "success",
             "counts": {
@@ -78,16 +61,16 @@ async def get_dashboard_overview(session: Session = Depends(get_session), admin:
                 "total_laporan": total_laporan, 
                 "santri_aktif": santri_aktif
             },
-            # Grafik ini nanti bisa dibuat query sendiri per hari
             "grafik_mingguan": [
                 {"hari": "Total", "laporan": total_laporan} 
             ]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal generate data: {str(e)}")
-    
+
+
 # ==========================================
-# 2. CREATE MUSYRIF (Hanya 1 Jalur /musyrif)
+# 2. CREATE MUSYRIF
 # ==========================================
 class MusyrifCreate(BaseModel):
     username: str
@@ -98,7 +81,7 @@ class MusyrifCreate(BaseModel):
 async def create_musyrif(data: MusyrifCreate, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     cek_user = session.exec(select(User).where(User.username == data.username)).first()
     if cek_user:
-        raise HTTPException(status_code=400, detail="Username musyrif udah ada yang pake!")
+        raise HTTPException(status_code=400, detail="Username musyrif sudah digunakan!")
     
     new_musyrif = User(
         username=data.username,
@@ -114,7 +97,7 @@ async def create_musyrif(data: MusyrifCreate, session: Session = Depends(get_ses
 
 
 # ==========================================
-# 3. GET ALL MUSYRIF (Hanya 1 Jalur /musyrif)
+# 3. GET ALL MUSYRIF
 # ==========================================
 @router.get("/musyrif")
 async def get_semua_musyrif(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
@@ -135,11 +118,11 @@ async def get_semua_musyrif(session: Session = Depends(get_session), admin: User
             ]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal narik data musyrif cok: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data musyrif: {str(e)}")
 
 
 # ==========================================
-# 4. CREATE KELOMPOK (Bikin Halaqah & Map ke Musyrif)
+# 4. KELOMPOK HALAQAH (CREATE & GET)
 # ==========================================
 class KelompokCreate(BaseModel):
     nama_kelompok: str
@@ -154,6 +137,7 @@ async def create_kelompok(data: KelompokCreate, session: Session = Depends(get_s
     cek_kelompok = session.exec(select(KelompokHalaqah).where(KelompokHalaqah.musyrif_id == data.musyrif_id)).first()
     if cek_kelompok:
         raise HTTPException(status_code=400, detail=f"Ustadz {musyrif.nama_lengkap} sudah memegang {cek_kelompok.nama_kelompok}!")
+    
     new_kelompok = KelompokHalaqah(
         nama_kelompok=data.nama_kelompok,
         musyrif_id=data.musyrif_id
@@ -165,9 +149,6 @@ async def create_kelompok(data: KelompokCreate, session: Session = Depends(get_s
     return {"status": "success", "message": f"Kelompok {new_kelompok.nama_kelompok} berhasil dibuat!"}
 
 
-# ==========================================
-# GET KELOMPOK (Untuk Dropdown Selection di Frontend)
-# ==========================================
 @router.get("/kelompok")
 async def get_semua_kelompok(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     try:
@@ -188,41 +169,34 @@ async def get_semua_kelompok(session: Session = Depends(get_session), admin: Use
 
 
 # ==========================================
-# 5. CREATE SANTRI (Tambah Santri & Map ke Kelompok)
+# 5. SANTRI MANAGEMENT (CREATE, GET, UPDATE, DELETE)
 # ==========================================
 class SantriCreate(BaseModel):
     nama_santri: str
     nomor_induk: str
-    kelompok_id: int
     kelompok_id: Optional[int] = None
 
 @router.post("/santri")
 def create_santri(data: SantriCreate, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    # 1. Cuma ngecek kalau kelompok_id ada isinya (bukan None/kosong)
     if data.kelompok_id: 
         kelompok = session.get(KelompokHalaqah, data.kelompok_id)
         if not kelompok:
             raise HTTPException(status_code=404, detail="Kelompok halaqah tidak ditemukan!")
     
-    # 2. Kalau kelompok_id None, ya lanjut aja simpan santrinya!
     santri = Santri(
         nama_santri=data.nama_santri,
         nomor_induk=data.nomor_induk,
-        kelompok_id=data.kelompok_id # Ini bakal jadi None kalau kosong
+        kelompok_id=data.kelompok_id
     )
     session.add(santri)
     session.commit()
     session.refresh(santri)
-    return santri
+    return {"status": "success", "data": santri}
 
 
-# ==========================================
-# 6. GET ALL SANTRI + RELASI JOIN 
-# ==========================================
 @router.get("/santri")
 async def get_semua_santri(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     try:
-        # Kita tambahin count(SetoranTahfizh.id) dan join ke tabel setoran
         statement = (
             select(
                 Santri, 
@@ -232,22 +206,24 @@ async def get_semua_santri(session: Session = Depends(get_session), admin: User 
             )
             .join(KelompokHalaqah, Santri.kelompok_id == KelompokHalaqah.id, isouter=True)
             .join(User, KelompokHalaqah.musyrif_id == User.id, isouter=True)
-            .join(SetoranTahfizh, Santri.id == SetoranTahfizh.santri_id, isouter=True) # <--- JOIN SETORAN
-            .group_by(Santri.id, KelompokHalaqah.id, User.id) # <--- WAJIB GROUP BY
+            .join(SetoranTahfizh, Santri.id == SetoranTahfizh.santri_id, isouter=True)
+            .group_by(Santri.id, KelompokHalaqah.id, User.id)
         )
         results = session.exec(statement).all()
         
         output = []
-        for santri, kelompok, musyrif, total_setoran in results: # Tambahin variabel total_setoran
+        for santri, kelompok, musyrif, total_setoran in results:
             output.append({
                 "id": santri.id,
                 "nama_santri": santri.nama_santri,
                 "nomor_induk": santri.nomor_induk,
-                "status_santri": getattr(santri, 'status_santri', 'aktif') or 'aktif',
+                "status_santri": getattr(santri, 'status_santri', 'hadir') or 'hadir',
+                "target_semester": getattr(santri, 'target_semester', None),
+                "target_harian": getattr(santri, 'target_harian', None),
                 "kelompok_id": santri.kelompok_id,
                 "nama_kelompok": kelompok.nama_kelompok if kelompok else "Belum Masuk Kelompok",
                 "nama_ustadz": musyrif.nama_lengkap if musyrif else "Ustadz Belum Diplotting",
-                "total_setoran": total_setoran # <--- Kirim ini ke frontend!
+                "total_setoran": total_setoran
             })
             
         return {"status": "success", "data": output}
@@ -255,16 +231,13 @@ async def get_semua_santri(session: Session = Depends(get_session), admin: User 
         raise HTTPException(status_code=500, detail=f"Gagal memuat list data santri: {str(e)}")
 
 
-# ==========================================
-# 7. UPDATE PLOTTING / KELOMPOK SANTRI (Fix 404)    
-# ==========================================
 class SantriUpdate(BaseModel):
     student_id: Optional[int] = None
     nama_santri: Optional[str] = None
     nomor_induk: Optional[str] = None
-    kelompok_id: Optional[int] = None  # Menampung ID Musyrif dari select frontend
+    kelompok_id: Optional[int] = None
 
-@router.put("/santri/{santri_id}") # Hapus /api/admin dari sini!
+@router.put("/santri/{santri_id}")
 def update_santri_plotting(
     santri_id: int,
     data: SantriUpdate,
@@ -272,75 +245,85 @@ def update_santri_plotting(
     admin: User = Depends(get_current_admin)
 ):
     santri = session.exec(select(Santri).where(Santri.id == santri_id)).first()
-
     if not santri:
-        raise HTTPException(status_code=404, detail=f"Santri dengan ID {santri_id} gak ketemu!")
+        raise HTTPException(status_code=404, detail=f"Santri dengan ID {santri_id} tidak ditemukan!")
     
-    # Update data
     if data.nama_santri: santri.nama_santri = data.nama_santri
     if data.nomor_induk: santri.nomor_induk = data.nomor_induk
     if data.kelompok_id is not None: santri.kelompok_id = data.kelompok_id
     
+    session.add(santri)
     session.commit()
     session.refresh(santri)
     return {"status": "success", "data": santri}
 
-# ==========================================
-# 8. POST DISRUPSI JADWAL
-# ==========================================
-class CatatDisrupsiRequest(BaseModel):
-    kelompok_id: int
-    badal_musyrif_id: Optional[int] = None
-    alasan: str
-    status_halaqah: str 
 
-@router.post("/halaqah/disrupsi")
-def catat_disrupsi_halaqah(data: CatatDisrupsiRequest, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    kelompok = session.get(KelompokHalaqah, data.kelompok_id)
-    if not kelompok:
-        raise HTTPException(status_code=404, detail="Kelompok halaqah tidak ditemukan!")
-        
-    if data.badal_musyrif_id:
-        badal = session.get(User, data.badal_musyrif_id)
-        if not badal or badal.role != "musyrif":
-            raise HTTPException(status_code=400, detail="User pengganti tidak valid atau bukan musyrif!")
-        if badal.id == kelompok.musyrif_id:
-            raise HTTPException(status_code=400, detail="Masa ustadz aslinya jadi badal buat dirinya sendiri cok? Pilih ustadz lain!")
-
-    log_gangguan = HalaqahDisruption(
-        kelompok_id=data.kelompok_id,
-        musyrif_id=kelompok.musyrif_id,
-        badal_musyrif_id=data.badal_musyrif_id,
-        alasan=data.alasan,
-        status_halaqah=data.status_halaqah
-    )
-    session.add(log_gangguan)
-    session.commit()
-    session.refresh(log_gangguan)
-    return {"status": "success", "message": f"Disrupsi tercatat!", "data": log_gangguan}
-
-
-# ==========================================
-# 9. DELETE SANTRI (Hapus Data Santri)
-# ==========================================
 @router.delete("/santri/{santri_id}") 
 def delete_santri(santri_id: int, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    # 1. Cari dulu apakah santri ada
     santri = session.exec(select(Santri).where(Santri.id == santri_id)).first()
     if not santri:
         raise HTTPException(status_code=404, detail="Data santri tidak ditemukan")
     
-    # 2. Hapus relasi (Setoran) terlebih dahulu untuk menghindari constraint error
-    # Kita gunakan santri_id agar konsisten dengan model SetoranTahfizh
-    session.exec(
-        delete(SetoranTahfizh).where(SetoranTahfizh.santri_id == santri_id)
-    )
-    
-    # 3. Hapus santri
+    session.exec(delete(SetoranTahfizh).where(SetoranTahfizh.santri_id == santri_id))
     session.delete(santri)
     session.commit()
+    return {"status": "success", "message": "Data santri berhasil dihapus!"}
+
+
+# ==========================================
+# 6. ADMIN FITUR BARU: INPUT TARGET SEMESTER
+# ==========================================
+class TargetAdminPayload(BaseModel):
+    target_semester: str
+
+@router.put("/santri/{santri_id}/target-semester")
+def set_target_semester(
+    santri_id: int, 
+    payload: TargetAdminPayload, 
+    session: Session = Depends(get_session),
+    admin: User = Depends(get_current_admin)
+):
+    santri = session.get(Santri, santri_id)
+    if not santri:
+        raise HTTPException(status_code=404, detail="Santri tidak ditemukan!")
+
+    santri.target_semester = payload.target_semester
+    session.add(santri)
+    session.commit()
+    session.refresh(santri)
     
-    return {"status": "success", "message": "Data berhasil dihapus!"}
+    return {
+        "status": "success", 
+        "message": f"Target semester untuk {santri.nama_santri} berhasil disimpan!",
+        "target_semester": santri.target_semester
+    }
+
+
+# ==========================================
+# 7. MANAJEMEN USER / MUSYRIF
+# ==========================================
+class UpdateRolePayload(BaseModel):
+    role: str
+
+@router.put("/musyrif/{user_id}")
+def change_musyrif_role(user_id: int, payload: UpdateRolePayload, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Musyrif/User tidak ditemukan!")
+    
+    if payload.role not in ["admin", "musyrif"]:
+        raise HTTPException(status_code=400, detail="Role harus 'admin' atau 'musyrif'!")
+
+    user.role = payload.role
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    
+    return {
+        "status": "success", 
+        "message": f"Berhasil mengubah role {user.nama_lengkap} menjadi {payload.role.upper()}!",
+        "data": {"id": user.id, "username": user.username, "role": user.role}
+    }
 
 
 @router.delete("/musyrif/{user_id}")
@@ -364,9 +347,42 @@ def delete_musyrif(user_id: int, session: Session = Depends(get_session), admin:
     session.commit()
     return {"status": "success", "message": "Data musyrif berhasil dihapus."}
 
-    # ==========================================
-# 10. GET MONITOR KELOLA HALAQAH (SUPER OVERVIEW)
+
 # ==========================================
+# 8. DISRUPSI JADWAL HALAQAH & MONITORING
+# ==========================================
+class CatatDisrupsiRequest(BaseModel):
+    kelompok_id: int
+    badal_musyrif_id: Optional[int] = None
+    alasan: str
+    status_halaqah: str 
+
+@router.post("/halaqah/disrupsi")
+def catat_disrupsi_halaqah(data: CatatDisrupsiRequest, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
+    kelompok = session.get(KelompokHalaqah, data.kelompok_id)
+    if not kelompok:
+        raise HTTPException(status_code=404, detail="Kelompok halaqah tidak ditemukan!")
+        
+    if data.badal_musyrif_id:
+        badal = session.get(User, data.badal_musyrif_id)
+        if not badal or badal.role != "musyrif":
+            raise HTTPException(status_code=400, detail="User pengganti tidak valid atau bukan musyrif!")
+        if badal.id == kelompok.musyrif_id:
+            raise HTTPException(status_code=400, detail="Musyrif asli tidak bisa menjadi badal untuk kelompoknya sendiri!")
+
+    log_gangguan = HalaqahDisruption(
+        kelompok_id=data.kelompok_id,
+        musyrif_id=kelompok.musyrif_id,
+        badal_musyrif_id=data.badal_musyrif_id,
+        alasan=data.alasan,
+        status_halaqah=data.status_halaqah
+    )
+    session.add(log_gangguan)
+    session.commit()
+    session.refresh(log_gangguan)
+    return {"status": "success", "message": "Disrupsi tercatat!", "data": log_gangguan}
+
+
 @router.get("/halaqah/monitor")
 def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     try:
@@ -375,8 +391,6 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
         
         for k in kelompok_list:
             musyrif_asli = session.get(User, k.musyrif_id)
-            
-            # Cari disrupsi / badal yang masih aktif
             badal_aktif = session.exec(
                 select(HalaqahDisruption)
                 .where(
@@ -386,7 +400,6 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
                 .order_by(HalaqahDisruption.id.desc())
             ).first()
             
-            # Hitung total santri di halaqah ini
             total_santri = session.exec(select(func.count(Santri.id)).where(Santri.kelompok_id == k.id)).one()
             
             nama_badal = None
@@ -409,99 +422,31 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
         return {"status": "success", "data": hasil}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal memuat data monitor halaqah: {str(e)}")
-    
-# ==========================================
-# 11. PUT CANCEL BADAL (KEMBALI KE MUSYRIF ASLI)
-# ==========================================
+
+
 @router.put("/halaqah/{kelompok_id}/cancel-badal")
 def cancel_badal_halaqah(kelompok_id: int, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    # Cari log badal yang statusnya masih aktif
     statement = select(HalaqahDisruption).where(
         HalaqahDisruption.kelompok_id == kelompok_id,
         HalaqahDisruption.status_halaqah == "diganti_badal"
     ).order_by(HalaqahDisruption.id.desc())
     
     disrupsi = session.exec(statement).first()
-    
     if not disrupsi:
-        raise HTTPException(status_code=400, detail="Halaqah ini lagi gak di-badal, statusnya udah normal!")
+        raise HTTPException(status_code=400, detail="Halaqah ini tidak sedang di-badal!")
         
-    # Ubah statusnya jadi selesai
     disrupsi.status_halaqah = "selesai"
-    
     session.add(disrupsi)
     session.commit()
     
     return {
         "status": "success", 
-        "message": "Status badal berhasil dicancel! Halaqah kembali dipegang musyrif asli."
+        "message": "Status badal berhasil dibatalkan! Halaqah kembali dipegang musyrif asli."
     }
 
-# ==========================================
-# 12. GET HISTORI LAPORAN PER HALAQAH
-# ==========================================
-@router.get("/halaqah/{kelompok_id}/laporan")
-def get_laporan_per_halaqah(kelompok_id: int, limit: int = 50, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    try:
-        # Join tabel SetoranTahfizh dengan Santri untuk ambil laporan spesifik kelompok ini
-        statement = (
-            select(SetoranTahfizh, Santri)
-            .join(Santri, SetoranTahfizh.santri_id == Santri.id)
-            .where(Santri.kelompok_id == kelompok_id)
-            .order_by(SetoranTahfizh.id.desc())
-            .limit(limit)
-        )
-        
-        results = session.exec(statement).all()
-        
-        laporan_list = []
-        for setoran, santri in results:
-            laporan_list.append({
-                "id_setoran": setoran.id,
-                "nama_santri": santri.nama_santri,
-                "surah": setoran.surah,
-                "ayat": setoran.ayat,
-                "status_kelancaran": setoran.status_kelancaran,
-                "catatan_musyrif": getattr(setoran, 'catatan_musyrif', None),
-                "ai_rekomendasi": getattr(setoran, 'ai_rekomendasi', None),
-                "waktu_setoran": format_indonesia(getattr(setoran, 'created_at', None))
-            })
-            
-        return {"status": "success", "total_data": len(laporan_list), "data": laporan_list}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal narik histori laporan: {str(e)}")
-# ==========================================
-# 13. UPDATE ROLE MUSYRIF (Admin Only)
-# ==========================================
-class UpdateRolePayload(BaseModel):
-    role: str
-
-@router.put("/musyrif/{user_id}")
-def change_musyrif_role(user_id: int, payload: UpdateRolePayload, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
-    # 1. Cari user berdasarkan ID
-    user = session.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="Musyrif/User tidak ditemukan cok!")
-    
-    # 2. Validasi input role biar ga aneh-aneh
-    if payload.role not in ["admin", "musyrif"]:
-        raise HTTPException(status_code=400, detail="Role harus 'admin' atau 'musyrif'!")
-
-    # 3. Eksekusi ganti role
-    user.role = payload.role
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    
-    return {
-        "status": "success", 
-        "message": f"⚡ Berhasil ganti role {user.nama_lengkap} jadi {payload.role.upper()}!",
-        "data": {"id": user.id, "username": user.username, "role": user.role}
-    }
 
 # ==========================================
-# 12. GET HISTORI LAPORAN PER HALAQAH (TANPA LIMIT!)
+# 9. HISTORI LAPORAN PER HALAQAH
 # ==========================================
 @router.get("/halaqah/{kelompok_id}/laporan")
 def get_laporan_per_halaqah(
@@ -510,7 +455,6 @@ def get_laporan_per_halaqah(
     admin: User = Depends(get_current_admin)
 ):
     try:
-        # HAPUS .limit() BIAR DITAMPILIN SEMUA HISTORI TANPA BATAS
         statement = (
             select(SetoranTahfizh, Santri)
             .join(Santri, SetoranTahfizh.santri_id == Santri.id)
@@ -536,11 +480,11 @@ def get_laporan_per_halaqah(
         return {"status": "success", "total_data": len(laporan_list), "data": laporan_list}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal narik histori laporan: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil histori laporan: {str(e)}")
 
 
 # ==========================================
-# 14. GET PROFILE USER / MUSYRIF (Lengkap + Histori Tanpa Limit)
+# 10. GET PROFILE USER / MUSYRIF
 # ==========================================
 @router.get("/musyrif/{user_id}/profile")
 def get_profile_musyrif(
@@ -552,21 +496,18 @@ def get_profile_musyrif(
     if not user:
         raise HTTPException(status_code=404, detail="User / Musyrif tidak ditemukan")
 
-    # Cari halaqah/kelompok yang dipegang
     kelompok_list = session.exec(
         select(KelompokHalaqah).where(KelompokHalaqah.musyrif_id == user.id)
     ).all()
 
     kelompok_ids = [k.id for k in kelompok_list]
 
-    # Hitung total santri binaan
     total_santri = 0
     if kelompok_ids:
         total_santri = session.exec(
             select(func.count(Santri.id)).where(Santri.kelompok_id.in_(kelompok_ids))
         ).one()
 
-    # Histori Seluruh Setoran yang Diampu Musyrif ini (TANPA LIMIT)
     histori_setoran = []
     if kelompok_ids:
         statement = (
