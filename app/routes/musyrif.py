@@ -24,7 +24,7 @@ from app.models import (
 
 load_dotenv(override=True)  
 
-# Konfigurasi OpenRouter
+# Konfigurasi OpenRouter AI
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_URL = os.getenv("OPENROUTER_URL") or "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "openrouter/free"
@@ -38,7 +38,13 @@ WIB = ZoneInfo("Asia/Jakarta")
 # SCHEMAS (PYDANTIC)
 # ==========================================
 class VoiceParseRequest(BaseModel):
-    voice_command_text: str
+    # Mendukung 'raw_text' (yang dikirim frontend Next.js) dan 'voice_command_text'
+    voice_command_text: Optional[str] = None
+    raw_text: Optional[str] = None
+
+    def get_text(self) -> str:
+        """Mengambil teks input terlepas dari key 'raw_text' atau 'voice_command_text'"""
+        return self.raw_text or self.voice_command_text or ""
 
 class SetoranCreate(BaseModel):
     santri_id: Optional[int] = Field(default=None, alias="student_id")
@@ -50,7 +56,7 @@ class SetoranCreate(BaseModel):
     status_kelancaran: str = "Lancar"
     catatan_koreksi: Optional[str] = None
     ada_teguran: Optional[bool] = False
-    jenis_teguran: Optional[List[str]] = Field(default_factory=list) # <--- Ubah jadi List[str]
+    jenis_teguran: Optional[List[str]] = Field(default_factory=list)
     catatan_teguran: Optional[str] = None
     catatan_musyrif: Optional[str] = ""
 
@@ -90,9 +96,6 @@ def get_session_username(request: Request, session_user: Optional[str] = None) -
     return session_user or request.headers.get("x-session-user") or request.cookies.get("x-session-user")
 
 
-# ==========================================
-# DATABASE LOOKUP QURAN (DARI TABEL DB)
-# ==========================================
 def get_quran_mapping_from_db(
     session: Session, 
     juz: Optional[int], 
@@ -109,7 +112,6 @@ def get_quran_mapping_from_db(
         .where(QuranPage.kaca == kaca)
     ).first()
 
-    # Fallback kalau data halaman tersebut belum di-seed di database
     if not mapping:
         return {
             "surah_id": None, 
@@ -136,8 +138,9 @@ def get_quran_mapping_from_db(
     }
 
 # ==========================================
-# 1. GET DAFTAR SANTRI BINAAN
+# 1. GET DAFTAR SANTRI / HALAQAH BINAAN
 # ==========================================
+@router.get("/halaqah")
 @router.get("/santri")
 def get_all_santri(
     request: Request,
@@ -183,29 +186,47 @@ def get_all_santri(
         "santri": formatted_santri
     }
 
-
+# ==========================================
+# 2. POST PARSING VOICE COMMAND MUSYRIF (REALTIME)
+# ==========================================
 @router.post("/parse-voice")
 async def parse_voice_command(
     data: VoiceParseRequest, 
     session: Session = Depends(get_session)
 ):
+    command_text = data.get_text()
+
+    if not command_text.strip():
+        raise HTTPException(status_code=422, detail="Teks transkrip suara kosong!")
+
     system_prompt = """
-Kamu adalah Ekstraktor Catatan Suara Realtime Halaqah (Live Session Assitant).
-Musyrif sedang MENYIMAK SANTRI SECARA LIVE dan mendiktekan koreksi/teguran saat itu juga di tempat setoran.
+Kamu adalah Ekstraktor Catatan Suara Realtime Halaqah (Live Session Assistant).
+Musyrif sedang MENYIMAK SANTRI SECARA LIVE dan mendiktekan koreksi/teguran via Speech-to-Text Browser.
+
+PENTING - KOREKSI PHONETIC / SALAH DENGAR STT BROWSER:
+Input teks berasal dari Web Speech API (id-ID) yang SANGAT SERING SALAH DENGAR istilah-istilah Tahfizh/Tajwid. Kamu WAJIB mengoreksi salah dengar fonetis tersebut sebelum mengekstrak JSON:
+- "ramalan", "kal kalah", "kalkalah", "kalo kalah", "pola puji" -> BERUBAH JADI -> "qalqalah"
+- "guna", "gunah", "guna guna" -> BERUBAH JADI -> "ghunnah"
+- "mahraj", "makraj", "makrajnya" -> BERUBAH JADI -> "makhraj"
+- "ikfa", "ifa" -> BERUBAH JADI -> "ikhfa"
+- "idgam" -> BERUBAH JADI -> "idgham"
+- "izhar" -> BERUBAH JADI -> "izhhar"
+- "jus", "jas", "J1", "J30" -> BERUBAH JADI -> "juz"
+- Jika input berisi "J1 kaca 5" atau serupa yang disebabkan salah dengar dari kata "juz 30 kaca 3", normalkan menjadi angka juz dan kaca yang rasional.
 
 PRINSIPIAL PARSING REALTIME:
 1. SETORAN JUZ & KACA:
-   - juz: integer 1-30 / null
-   - kaca: integer nomor halaman / null
+   - juz: integer 1-30 / null (Contoh: "juz 30" -> 30, "juz tiga puluh" -> 30)
+   - kaca: integer nomor halaman / null (Contoh: "kaca 3" -> 3, "kaca tiga" -> 3)
    - bagian: "a" (paruh atas/awal) / "b" (paruh bawah/akhir) / null
    - surah_langsung & ayat_langsung: Isi jika musyrif menyebut surah murni (contoh: "Al-Mulk 1-15").
 
-2. ELSPLISIT KOREKSI TAJWID & MAKHRAJ (INSTAN):
+2. EKSPLISIT KOREKSI TAJWID & MAKHRAJ (INSTAN):
    - status_kelancaran: Pilih dari ["Lancar", "Cukup Lancar", "Kurang Lancar", "Mengulang"]. Default: "Lancar".
-   - catatan_koreksi: Tangkap langsung kesalahan bacaan saat itu juga (contoh: "ghunnah kurang tahan", "makhraj ain tertukar", "qalqalah kurang pantul", "mad kurang panjang").
+   - catatan_koreksi: Tangkap langsung kesalahan bacaan setelah dikoreksi istilahnya (contoh: "qalqalah kurang jelas", "ghunnah kurang tahan", "makhraj ain tertukar"). JANGAN MASUKKAN kata "ramalan" jika maksudnya "qalqalah"!
 
 3. LOGIKA CLUE / BISIKAN INGATAN (LIVE ASSIST):
-   - Hitung angka bantuan clue/lupa yang diucapkan musyrif (contoh: "clue 7x", "dibisikin 7 kali", "potongan ayat 7x").
+   - Hitung angka bantuan clue/lupa yang diucapkan musyrif (contoh: "clue 7x", "dibisikin 7 kali").
    - jumlah_clue_ingatan: integer.
    - JIKA jumlah_clue_ingatan >= 7, OTOMATIS masukkan "Ingatan" ke array `jenis_teguran`.
 
@@ -213,7 +234,7 @@ PRINSIPIAL PARSING REALTIME:
    - jenis_teguran: Array dari ["Tajwid/Makhraj", "Ingatan", "Adab", "Kedisiplinan", "Lainnya"].
    - Jika ada koreksi tajwid/makhraj -> Sertakan "Tajwid/Makhraj".
    - Jika jumlah_clue_ingatan >= 7 -> Sertakan "Ingatan".
-   - Jika musyrif menegur sikap duduk/adab (contoh: "mainan peci", "ngobrol", "tidak sopan") -> Sertakan "Adab".
+   - Jika musyrif menegur sikap duduk/adab (contoh: "mainan peci", "ngobrol") -> Sertakan "Adab".
    - catatan_teguran: Isi poin teguran adab/kedisiplinan realtime tersebut.
    - ada_teguran: boolean (true jika array `jenis_teguran` tidak kosong).
 
@@ -243,7 +264,7 @@ KELUARKAN HASIL HANYA DALAM FORMAT JSON:
         "model": OPENROUTER_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Ucapan Live Musyrif: \"{data.voice_command_text}\""}
+            {"role": "user", "content": f"Ucapan Live Musyrif: \"{command_text}\""}
         ],
         "temperature": 0.0,
         "response_format": {"type": "json_object"}
@@ -333,6 +354,7 @@ KELUARKAN HASIL HANYA DALAM FORMAT JSON:
     except Exception as e:
         print(f"❌ VOICE PARSE ERROR: {e}")
 
+    # Fallback jika terjadi error AI / Timeout
     return {
         "status": "error_fallback",
         "message": "Gagal terhubung ke AI, silakan isi manual",
@@ -341,7 +363,7 @@ KELUARKAN HASIL HANYA DALAM FORMAT JSON:
             "surah_sahih": None,
             "ayat_standar": "-",
             "status_kelancaran": "Lancar",
-            "catatan_koreksi": data.voice_command_text,
+            "catatan_koreksi": command_text,
             "jumlah_clue_ingatan": 0,
             "ada_teguran": False,
             "jenis_teguran": [],
@@ -414,7 +436,6 @@ async def input_setoran(
     session.refresh(new_setoran)
 
     return {"status": "success", "message": "Setoran berhasil dicatat!", "data": new_setoran}
-
 
 # ==========================================
 # 4. FITUR MUSYRIF: TARGET HARIAN, STATUS, & UJIAN
@@ -531,15 +552,14 @@ def submit_hasil_ujian(
     if santri.status_santri != "persiapan_ujian":
         raise HTTPException(status_code=400, detail="Santri tidak sedang dalam masa ujian!")
 
-    # 🔄 Update status berdasarkan hasil
+    # Update status berdasarkan hasil
     if payload.hasil == "lulus":
         santri.status_santri = "hadir"
         pesan = f"Selamat! Santri {santri.nama_santri} LULUS ujian dan kembali ke halaqah."
-    else:  # Jika remed
+    else:
         santri.status_santri = "remed_ujian"
         pesan = f"Santri {santri.nama_santri} perlu REMEDIAL ujian. Tetap semangat!"
 
-    # 📝 Catat ke Log Status
     catatan_teks = f"Hasil: {payload.hasil.upper()}."
     if payload.catatan:
         catatan_teks += f" Catatan Musyrif: {payload.catatan}"
@@ -560,9 +580,41 @@ def submit_hasil_ujian(
         "keterangan_log": catatan_teks
     }
 
+# ==========================================
+# 5. STATISTIK & HISTORI SETORAN SANTRI (FIX 404 ERROR)
+# ==========================================
+@router.get("/statistik/setoran/{santri_id}")
+def get_statistik_setoran_santri(santri_id: int, session: Session = Depends(get_session)):
+    santri = session.get(Santri, santri_id)
+    if not santri:
+        raise HTTPException(status_code=404, detail="Santri tidak ditemukan!")
+
+    setoran_list = session.exec(
+        select(SetoranTahfizh)
+        .where(SetoranTahfizh.santri_id == santri_id)
+        .order_by(SetoranTahfizh.id.desc())
+    ).all()
+
+    return {
+        "status": "success",
+        "santri_id": santri_id,
+        "nama_santri": santri.nama_santri,
+        "total_setoran": len(setoran_list),
+        "riwayat_lengkap": [
+            {
+                "id": s.id,
+                "surah": s.surah,
+                "ayat": s.ayat,
+                "status": s.status_kelancaran.lower() if s.status_kelancaran else "lancar",
+                "status_kelancaran": s.status_kelancaran or "Lancar",
+                "catatan": getattr(s, "catatan_musyrif", ""),
+                "waktu": format_indonesia(getattr(s, "created_at", None))
+            } for s in setoran_list
+        ]
+    }
 
 # ==========================================
-# 5. RANGKUMAN HARIAN & ANALISIS AI
+# 6. RANGKUMAN HARIAN & ANALISIS AI
 # ==========================================
 @router.post("/ai/rangkuman-harian/{santri_id}")
 async def generate_rangkuman_harian(
@@ -718,9 +770,8 @@ async def analyze_overall_santri(santri_id: int, session: Session = Depends(get_
         }
     }
 
-
 # ==========================================
-# 6. RAPORT SANTRI
+# 7. RAPORT SANTRI
 # ==========================================
 @router.post("/raport")
 def submit_nilai_raport(data: RaportCreate, session: Session = Depends(get_session)):
@@ -769,9 +820,8 @@ def get_nilai_raport(santri_id: int, session: Session = Depends(get_session)):
 
     return {"status": "success", "data": raports}
 
-
 # ==========================================
-# 7. PROFILE DETAIL SANTRI (LENGKAP TARGET & UJIAN)
+# 8. PROFILE DETAIL SANTRI (LENGKAP TARGET & UJIAN)
 # ==========================================
 @router.get("/santri/{santri_id}/profile")
 def get_profile_santri(
