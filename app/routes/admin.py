@@ -169,7 +169,7 @@ async def get_semua_kelompok(session: Session = Depends(get_session), admin: Use
 
 
 # ==========================================
-# 5. SANTRI MANAGEMENT (CREATE, GET, UPDATE, DELETE)
+# 5. SANTRI MANAGEMENT
 # ==========================================
 class SantriCreate(BaseModel):
     nama_santri: str
@@ -352,13 +352,36 @@ def delete_musyrif(user_id: int, session: Session = Depends(get_session), admin:
 # 8. DISRUPSI JADWAL HALAQAH & MONITORING
 # ==========================================
 class CatatDisrupsiRequest(BaseModel):
-    kelompok_id: int
+    kelompok_id: Optional[int] = None
     badal_musyrif_id: Optional[int] = None
     alasan: str
-    status_halaqah: str 
+    status_halaqah: str
 
 @router.post("/halaqah/disrupsi")
 def catat_disrupsi_halaqah(data: CatatDisrupsiRequest, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
+    
+    # 1. LOGIC JIKA DILIBURKAN TOTAL (BERLAKU UNTUK SEMUA)
+    if data.status_halaqah == "diliburkan_total":
+        kelompok_list = session.exec(select(KelompokHalaqah)).all()
+        if not kelompok_list:
+            raise HTTPException(status_code=400, detail="Belum ada kelompok halaqah yang terdaftar!")
+        
+        for k in kelompok_list:
+            log_libur = HalaqahDisruption(
+                kelompok_id=k.id,
+                musyrif_id=k.musyrif_id,
+                badal_musyrif_id=None,
+                alasan=data.alasan,
+                status_halaqah="diliburkan_total"
+            )
+            session.add(log_libur)
+        session.commit()
+        return {"status": "success", "message": "Semua halaqah berhasil diliburkan!"}
+
+    # 2. LOGIC JIKA DIGANTI BADAL (BERLAKU UNTUK 1 KELOMPOK)
+    if not data.kelompok_id:
+        raise HTTPException(status_code=400, detail="Kelompok ID wajib diisi untuk ustadz badal!")
+        
     kelompok = session.get(KelompokHalaqah, data.kelompok_id)
     if not kelompok:
         raise HTTPException(status_code=404, detail="Kelompok halaqah tidak ditemukan!")
@@ -368,7 +391,7 @@ def catat_disrupsi_halaqah(data: CatatDisrupsiRequest, session: Session = Depend
         if not badal or badal.role != "musyrif":
             raise HTTPException(status_code=400, detail="User pengganti tidak valid atau bukan musyrif!")
         if badal.id == kelompok.musyrif_id:
-            raise HTTPException(status_code=400, detail="Musyrif asli tidak bisa menjadi badal untuk kelompoknya sendiri!")
+            raise HTTPException(status_code=400, detail="Musyrif asli tidak bisa menjadi badal!")
 
     log_gangguan = HalaqahDisruption(
         kelompok_id=data.kelompok_id,
@@ -379,8 +402,7 @@ def catat_disrupsi_halaqah(data: CatatDisrupsiRequest, session: Session = Depend
     )
     session.add(log_gangguan)
     session.commit()
-    session.refresh(log_gangguan)
-    return {"status": "success", "message": "Disrupsi tercatat!", "data": log_gangguan}
+    return {"status": "success", "message": "Disrupsi badal tercatat!"}
 
 
 @router.get("/halaqah/monitor")
@@ -395,7 +417,7 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
                 select(HalaqahDisruption)
                 .where(
                     HalaqahDisruption.kelompok_id == k.id, 
-                    HalaqahDisruption.status_halaqah == "diganti_badal"
+                    HalaqahDisruption.status_halaqah.in_(["diganti_badal", "diliburkan_total"])
                 )
                 .order_by(HalaqahDisruption.id.desc())
             ).first()
@@ -412,7 +434,7 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
                 "nama_kelompok": k.nama_kelompok,
                 "musyrif_asli": musyrif_asli.nama_lengkap if musyrif_asli else "Belum Ada Ustadz",
                 "total_santri": total_santri,
-                "status_halaqah": "diganti_badal" if badal_aktif else "normal",
+                "status_halaqah": badal_aktif.status_halaqah if badal_aktif else "normal",
                 "info_badal": {
                     "nama_badal": nama_badal,
                     "alasan": badal_aktif.alasan if badal_aktif else ""
@@ -428,7 +450,7 @@ def get_monitor_halaqah(session: Session = Depends(get_session), admin: User = D
 def cancel_badal_halaqah(kelompok_id: int, session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
     statement = select(HalaqahDisruption).where(
         HalaqahDisruption.kelompok_id == kelompok_id,
-        HalaqahDisruption.status_halaqah == "diganti_badal"
+        HalaqahDisruption.status_halaqah.in_(["diganti_badal", "diliburkan_total"])
     ).order_by(HalaqahDisruption.id.desc())
     
     disrupsi = session.exec(statement).first()
