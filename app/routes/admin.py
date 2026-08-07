@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session, select, SQLModel, Field, delete
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime
 from sqlalchemy import func
 
-from app.models import Santri, KelompokHalaqah, User, SetoranTahfizh, HalaqahDisruption
+from app.models import Santri, KelompokHalaqah, User, SetoranTahfizh, HalaqahDisruption, StatusSantriLog
 from app.timezone import now_indonesia, format_indonesia
 from app.security import hash_password
 from app.database import get_session, engine 
@@ -116,6 +116,7 @@ async def get_semua_musyrif(session: Session = Depends(get_session), admin: User
                     "username": u.username,
                     "nama_lengkap": u.nama_lengkap,
                     "role": u.role,
+                    "foto_profile": getattr(u, "foto_profile", None) or getattr(u, "foto", None), # <--- TAMBAHKAN INI
                     "tanggal_dibuat": format_indonesia(getattr(u, "created_at", None), "%d/%m/%Y")
                 } for u in list_pengguna
             ]
@@ -263,6 +264,7 @@ async def get_semua_santri(session: Session = Depends(get_session), admin: User 
                 "id": santri.id,
                 "nama_santri": santri.nama_santri,
                 "nomor_induk": santri.nomor_induk,
+                "foto_profile": getattr(santri, 'foto_profile', None) or getattr(santri, 'foto', None),
                 "status_santri": getattr(santri, 'status_santri', 'hadir') or 'hadir',
                 "target_semester": getattr(santri, 'target_semester', None),
                 "target_harian": getattr(santri, 'target_harian', None),
@@ -275,6 +277,95 @@ async def get_semua_santri(session: Session = Depends(get_session), admin: User 
         return {"status": "success", "data": output}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal memuat list data santri: {str(e)}")
+
+
+@router.get("/ujian")
+def get_santri_ujian_list(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
+    santri_list = session.exec(
+        select(Santri)
+        .where(Santri.status_santri.in_(["persiapan_ujian", "remed_ujian"]))
+        .order_by(Santri.id.asc())
+    ).all()
+
+    output = []
+    for santri in santri_list:
+        kelompok = session.get(KelompokHalaqah, santri.kelompok_id) if getattr(santri, "kelompok_id", None) else None
+        musyrif = session.get(User, kelompok.musyrif_id) if (kelompok and getattr(kelompok, "musyrif_id", None)) else None
+
+        nama_kelompok = kelompok.nama_kelompok if kelompok else "Belum Masuk Kelompok"
+        nama_musyrif = getattr(musyrif, "nama_lengkap", musyrif.username) if musyrif else "Belum Diplotting"
+
+        output.append({
+            "id": santri.id,
+            "nama_santri": santri.nama_santri,
+            "nomor_induk": getattr(santri, "nomor_induk", ""),
+            "foto_profile": getattr(santri, "foto_profile", None) or getattr(santri, "foto", None),
+            "status_santri": getattr(santri, "status_santri", "hadir") or "hadir",
+            "tanggal_ujian": getattr(santri, "tanggal_ujian", None),
+            "catatan_persiapan_ujian": getattr(santri, "catatan_persiapan_ujian", None),
+            "nilai_ujian": getattr(santri, "nilai_ujian", None),
+            "hasil_ujian": getattr(santri, "hasil_ujian", None),
+            "nama_kelompok": nama_kelompok,
+            "nama_musyrif": nama_musyrif,
+            "label": f"{santri.nama_santri} — {nama_kelompok} ({nama_musyrif})"
+        })
+
+    return {"status": "success", "data": output}
+
+
+class HasilUjianAdminPayload(BaseModel):
+    hasil: Literal["lulus", "remed"]
+    nilai: Optional[float] = None
+    catatan: Optional[str] = None
+
+
+@router.get("/ujian/santri")
+def get_santri_ujian_list_alias(session: Session = Depends(get_session), admin: User = Depends(get_current_admin)):
+    return get_santri_ujian_list(session=session, admin=admin)
+
+
+@router.post("/ujian/santri/{santri_id}/hasil")
+def submit_hasil_ujian_admin(
+    santri_id: int,
+    payload: HasilUjianAdminPayload,
+    session: Session = Depends(get_session),
+    admin: User = Depends(get_current_admin)
+):
+    santri = session.get(Santri, santri_id)
+    if not santri:
+        raise HTTPException(status_code=404, detail="Santri tidak ditemukan")
+
+    if getattr(santri, "status_santri", "hadir") not in ["persiapan_ujian", "remed_ujian"]:
+        raise HTTPException(status_code=400, detail="Santri ini tidak sedang dalam daftar ujian")
+
+    santri.hasil_ujian = payload.hasil
+    santri.nilai_ujian = payload.nilai
+    santri.status_santri = "hadir"
+    santri.tanggal_ujian = None
+    santri.catatan_persiapan_ujian = None
+
+    log = StatusSantriLog(
+        santri_id=santri.id,
+        status="hadir",
+        keterangan=f"Hasil ujian: {payload.hasil.upper()}. Nilai: {payload.nilai if payload.nilai is not None else '-'} . Catatan: {payload.catatan or '-'}"
+    )
+
+    session.add(santri)
+    session.add(log)
+    session.commit()
+    session.refresh(santri)
+
+    return {
+        "status": "success",
+        "message": f"Hasil ujian untuk {santri.nama_santri} berhasil disimpan",
+        "data": {
+            "id": santri.id,
+            "nama_santri": santri.nama_santri,
+            "hasil_ujian": santri.hasil_ujian,
+            "nilai_ujian": santri.nilai_ujian,
+            "status_santri": santri.status_santri,
+        }
+    }
 
 
 class SantriUpdate(BaseModel):
@@ -645,6 +736,7 @@ def get_profile_musyrif(
             "username": user.username,
             "nama_lengkap": user.nama_lengkap,
             "role": user.role,
+            "foto_profile": getattr(user, "foto_profile", None) or getattr(user, "foto", None),
             "tanggal_dibuat": format_indonesia(getattr(user, "created_at", None), "%d/%m/%Y") if getattr(user, "created_at", None) else "-",
             "total_kelompok": len(kelompok_list),
             "kelompok_diampu": [k.nama_kelompok for k in kelompok_list],

@@ -1,6 +1,7 @@
 import os
 
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.routes import auth, admin, musyrif
@@ -16,6 +17,10 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+
+# Pastikan folder static yang dipakai tersedia
+os.makedirs("static/uploads/profiles", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Sesuaikan dengan domain Anda
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://tia.khwarizmi.co.id")

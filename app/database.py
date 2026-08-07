@@ -39,6 +39,16 @@ def ensure_runtime_columns():
                 connection.execute(text("ALTER TABLE quran_verses ADD COLUMN juz_number INTEGER DEFAULT 1"))
                 connection.execute(text("CREATE INDEX IF NOT EXISTS ix_quran_verses_juz_number ON quran_verses (juz_number)"))
 
+        # 3. Migration safety check untuk santri foto profil & hasil ujian
+        if "santri" in existing_tables:
+            santri_columns = {column["name"] for column in inspector.get_columns("santri")}
+            if "foto_profile" not in santri_columns:
+                connection.execute(text("ALTER TABLE santri ADD COLUMN foto_profile VARCHAR DEFAULT NULL"))
+            if "nilai_ujian" not in santri_columns:
+                connection.execute(text("ALTER TABLE santri ADD COLUMN nilai_ujian FLOAT DEFAULT NULL"))
+            if "hasil_ujian" not in santri_columns:
+                connection.execute(text("ALTER TABLE santri ADD COLUMN hasil_ujian VARCHAR DEFAULT NULL"))
+
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session

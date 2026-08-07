@@ -38,7 +38,7 @@ class User(SQLModel, table=True):
 
     # Relasi back-population
     kelompok: Optional["KelompokHalaqah"] = Relationship(back_populates="musyrif")
-
+    foto_profile: Optional[str] = Field(default=None, nullable=True)
 
 # ==========================================
 # 3. TABEL KELOMPOK HALAQAH
@@ -81,6 +81,11 @@ class Santri(SQLModel, table=True):
     # Ujian
     tanggal_ujian: Optional[date] = None         # Tanggal pelaksanaan ujian
     catatan_persiapan_ujian: Optional[str] = None # Instruksi persiapan sampai hari H
+    nilai_ujian: Optional[float] = None           # Nilai hasil ujian
+    hasil_ujian: Optional[str] = None            # 'lulus' atau 'remed'
+
+    # Foto profil santri
+    foto_profile: Optional[str] = Field(default=None, nullable=True)
 
 
 # ==========================================
@@ -145,6 +150,7 @@ class RaportSantri(SQLModel, table=True):
     nilai_bulanan: float 
     nilai_akhir: float   
     catatan_musyrif: Optional[str] = ""
+    rekomendasi_ai: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=now_indonesia)
 
 
@@ -177,3 +183,16 @@ class QuranPage(SQLModel, table=True):
     surah_name: str
     ayat_start: int
     ayat_end: int
+
+# ==========================================
+# 11. TABEL SURAH & ASRAR REFERENCE
+# ==========================================
+class SurahModel(SQLModel, table=True):
+    __tablename__ = "surahs"
+    __table_args__ = {"extend_existing": True}
+
+    id_surah: int = Field(primary_key=True, index=True) # 1 - 114
+    nama_surah: str = Field(nullable=False)             # Al-Fatihah, dll
+    nama_lain: Optional[str] = Field(default=None)      # Ummul Kitab, dll
+    typo_asr: Optional[str] = Field(default=None)       # Referensi typo pencarian asr
+    
