@@ -116,6 +116,8 @@ class SetoranTahfizh(SQLModel, table=True):
     ayat: str = Field(nullable=False)
     status_kelancaran: str = Field(nullable=False)
     catatan_musyrif: Optional[str] = Field(default=None)
+    jumlah_tersendat: int = Field(default=0)
+    jumlah_teguran: int = Field(default=0)
     created_at: Optional[datetime] = Field(default_factory=now_indonesia)
     ai_rekomendasi: Optional[str] = Field(default=None)
 

@@ -29,7 +29,15 @@ def ensure_runtime_columns():
                     text(f"ALTER TABLE {table_name} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 )
 
-        # 2. Migration safety check untuk quran_verses
+        # 2. Migration safety check untuk setoran_tahfizh (jumlah_tersendat & jumlah_teguran)
+        if "setoran_tahfizh" in existing_tables:
+            setoran_columns = {column["name"] for column in inspector.get_columns("setoran_tahfizh")}
+            if "jumlah_tersendat" not in setoran_columns:
+                connection.execute(text("ALTER TABLE setoran_tahfizh ADD COLUMN jumlah_tersendat INTEGER DEFAULT 0 NOT NULL"))
+            if "jumlah_teguran" not in setoran_columns:
+                connection.execute(text("ALTER TABLE setoran_tahfizh ADD COLUMN jumlah_teguran INTEGER DEFAULT 0 NOT NULL"))
+
+        # 3. Migration safety check untuk quran_verses
         if "quran_verses" in existing_tables:
             quran_columns = {column["name"] for column in inspector.get_columns("quran_verses")}
             if "page_number" not in quran_columns:

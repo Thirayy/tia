@@ -27,7 +27,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "https://tia.khwarizmi.co.id")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:3002", "http://127.0.0.1:3002","http://tia.khwarizmi.co.id", "https://tia.khwarizmi.co.id"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,7 +1,7 @@
 import pandas as pd
 from sqlmodel import Session, select, SQLModel
 from app.database import engine
-from app.models import SurahModel  # Ganti dengan nama model tabel surah lo di app.models
+from app.models import SurahModel  # Ganti dengan nama model tabel surah di app.models
 
 file_path = "kamus_surah_bersih.csv"
 

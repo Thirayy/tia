@@ -672,6 +672,8 @@ def get_laporan_per_halaqah(
                 "surah": setoran.surah,
                 "ayat": setoran.ayat,
                 "status_kelancaran": setoran.status_kelancaran,
+                "jumlah_tersendat": getattr(setoran, 'jumlah_tersendat', 0),
+                "jumlah_teguran": getattr(setoran, 'jumlah_teguran', 0),
                 "catatan_musyrif": getattr(setoran, 'catatan_musyrif', None),
                 "ai_rekomendasi": getattr(setoran, 'ai_rekomendasi', None),
                 "waktu_setoran": format_indonesia(getattr(setoran, 'created_at', None))
@@ -725,6 +727,8 @@ def get_profile_musyrif(
                 "surah": s.surah,
                 "ayat": s.ayat,
                 "status_kelancaran": s.status_kelancaran,
+                "jumlah_tersendat": getattr(s, 'jumlah_tersendat', 0),
+                "jumlah_teguran": getattr(s, 'jumlah_teguran', 0),
                 "catatan_musyrif": getattr(s, 'catatan_musyrif', ''),
                 "waktu_setoran": format_indonesia(getattr(s, 'created_at', None))
             })
