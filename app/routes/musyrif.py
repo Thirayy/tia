@@ -7,7 +7,7 @@ import uuid
 import shutil
 import mimetypes
 import base64
-from typing import Optional, List, Literal, Dict, Any, Union
+from typing import Optional, List, Literal, Dict, Any, Union, Tuple
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -22,24 +22,26 @@ from pydantic import BaseModel, Field, ConfigDict
 from app.database import get_session
 from app.timezone import now_indonesia, format_indonesia
 from app.models import (
-    User, 
-    KelompokHalaqah, 
-    Santri, 
-    SetoranTahfizh, 
-    StatusSantriLog, 
+    User,
+    KelompokHalaqah,
+    Santri,
+    SetoranTahfizh,
+    StatusSantriLog,
     RaportSantri,
-    QuranPage
+    QuranPage,
+    TajwidRubrik,
+    QuranKnowledge
 )
 
 app = FastAPI()
 
 # Load Environment Variables
-load_dotenv(override=True)  
+load_dotenv(override=True)
 
 # Konfigurasi OpenRouter AI
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_URL = os.getenv("OPENROUTER_URL") or "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "openrouter/free"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "google/gemini-3.7-flash"
 
 # Password Hashing Engine
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -77,7 +79,7 @@ def load_surah_dataset_from_csv(csv_path: str = "kamus_surah_bersih.csv"):
                     continue
                 surah_id = int(row["id_surah"].strip())
                 nama_surah = row.get("nama_surah", "").strip()
-                
+
                 nama_lain_list = [x.strip().lower() for x in row.get("nama_lain", "").split(",") if x.strip()]
                 typo_list = [x.strip().lower() for x in row.get("typo_asr", "").split(",") if x.strip()]
                 all_aliases = list(set(nama_lain_list + typo_list))
@@ -96,7 +98,6 @@ def load_surah_dataset_from_csv(csv_path: str = "kamus_surah_bersih.csv"):
     except Exception as e:
         print(f"❌ [ERROR LOAD CSV] Gagal membaca dataset surah: {e}")
 
-# Inisialisasi Dataset Surah
 load_surah_dataset_from_csv("kamus_surah_bersih.csv")
 
 
@@ -121,8 +122,38 @@ def find_best_surah_match(raw_query: str, cutoff_score: float = 60.0) -> Optiona
             "surah_sahih": surah_sahih,
             "match_score": score
         }
-    
+
     return None
+
+
+# ==========================================
+# HELPER: MENCARI RUBRIK TAJWID DARI DATABASE
+# ==========================================
+def enrich_tajwid_with_database_rubric(session: Session, query_text: str) -> List[Dict[str, Any]]:
+    all_rubrik = session.exec(select(TajwidRubrik)).all()
+    if not all_rubrik:
+        return []
+
+    choices = {f"{item.kategori} - {item.sub_kaidah}": item for item in all_rubrik}
+
+    match = process.extractOne(
+        query_text.lower(),
+        list(choices.keys()),
+        scorer=fuzz.WRatio,
+        score_cutoff=45.0
+    )
+
+    if match:
+        matched_key, score, _ = match
+        selected = choices[matched_key]
+        return [{
+            "kategori": selected.kategori,
+            "sub_kaidah": selected.sub_kaidah,
+            "keterangan_kaidah": selected.keterangan,
+            "kriteria_seharusnya": selected.kriteria_penilaian,
+            "match_score": score
+        }]
+    return []
 
 
 # ==========================================
@@ -138,12 +169,12 @@ class VoiceParseRequest(BaseModel):
 class TajwidDetailSchema(BaseModel):
     rule: str
     error_description: str
-    count: int
+    count: int = 1
 
 class MakhrajDetailSchema(BaseModel):
     letter: str
     error_description: str
-    count: int
+    count: int = 1
 
 class SetoranCreate(BaseModel):
     santri_id: Optional[int] = Field(default=None, alias="student_id")
@@ -152,22 +183,27 @@ class SetoranCreate(BaseModel):
     surah: Optional[str] = None
     ayat_standar: Optional[str] = None
     ayat: Optional[str] = None
-    status_kelancaran: Literal["lancar", "tersendat", "gagal", "ulang"] = "lancar"
+    status_kelancaran: Literal[
+        "sempurna",
+        "tegur_ringan",
+        "bantuan_talqin",
+        "lupa_berulang",
+        "blok_total",
+        "idhthirab",
+        "gagal_total"
+    ] = "sempurna"
     catatan_musyrif: Optional[str] = ""
-    jumlah_tersendat: int = 0
-    jumlah_teguran: int = 0
     tajwid_details: Optional[List[TajwidDetailSchema]] = []
     makhraj_details: Optional[List[MakhrajDetailSchema]] = []
 
     model_config = ConfigDict(populate_by_name=True)
-
 
 class TargetMusyrifPayload(BaseModel):
     target_harian: str
 
 class UpdateStatusPayload(BaseModel):
     status: str
-    keterangan: Optional[str] = None 
+    keterangan: Optional[str] = None
 
 class DaftarUjianPayload(BaseModel):
     tanggal_ujian: date
@@ -186,6 +222,8 @@ class RaportCreate(BaseModel):
     nilai_harian: float
     nilai_bulanan: float
     nilai_akhir: float
+    aspek_7_kategori: Optional[str] = None
+    skor_tajwid_detail: Optional[str] = None
     catatan_musyrif: Optional[str] = ""
     rekomendasi_ai: Optional[str] = None
     auto_generate_ai: Optional[bool] = True
@@ -215,39 +253,43 @@ class ChangePasswordPayload(BaseModel):
 # HELPER FUNCTIONS
 # ==========================================
 def normalize_status_kelancaran(
-    status: Optional[str], 
-    catatan: Optional[str], 
-    jumlah_tersendat: int = 0, 
-    jumlah_teguran: int = 0
+    status: Optional[str],
+    catatan: Optional[str]
 ) -> str:
     catatan_lower = (catatan or "").lower()
     current_status = (status or "").lower().strip()
 
-    if jumlah_tersendat == 0 and jumlah_teguran == 0:
-        if any(keyword in catatan_lower for keyword in ["ulang", "salah", "banyak kesalahan", "kesulitan"]):
-            return "ulang" if ("ulang" in catatan_lower or "banyak" in catatan_lower) else "tersendat"
-        if current_status in ["ulang", "gagal"]:
-            return "ulang"
-        if current_status in ["tersendat", "sedang"]:
-            return "tersendat"
-        return "lancar"
+    valid_categories = [
+        "sempurna", "tegur_ringan", "bantuan_talqin",
+        "lupa_berulang", "blok_total", "idhthirab", "gagal_total"
+    ]
 
-    if jumlah_tersendat >= 12 or jumlah_teguran >= 25 or current_status == "ulang":
-        return "ulang"
-    
-    if 1 <= jumlah_tersendat < 12 or 1 <= jumlah_teguran < 25 or current_status == "tersendat":
-        return "tersendat"
-        
-    return "lancar"
+    if current_status in valid_categories:
+        return current_status
+
+    if "gagal" in catatan_lower or "tidak mampu" in catatan_lower:
+        return "gagal_total"
+    if "idhthirab" in catatan_lower or "loncat" in catatan_lower or "tertukar" in catatan_lower:
+        return "idhthirab"
+    if "total" in catatan_lower or "tidak bisa lanjut" in catatan_lower:
+        return "blok_total"
+    if "berulang" in catatan_lower or "maqra" in catatan_lower:
+        return "lupa_berulang"
+    if "talqin" in catatan_lower:
+        return "bantuan_talqin"
+    if "tegur" in catatan_lower or "tersendat" in catatan_lower:
+        return "tegur_ringan"
+
+    return "sempurna"
 
 def get_session_username(request: Request, session_user: Optional[str] = None) -> Optional[str]:
     return session_user or request.headers.get("x-session-user") or request.cookies.get("x-session-user")
 
 
 def get_quran_mapping_from_db(
-    session: Session, 
-    juz: Optional[int], 
-    kaca: Optional[int], 
+    session: Session,
+    juz: Optional[int],
+    kaca: Optional[int],
     bagian: Optional[str] = None,
     surah_id: Optional[int] = None
 ) -> dict:
@@ -262,7 +304,7 @@ def get_quran_mapping_from_db(
             .where(QuranPage.surah_id == surah_id)
             .order_by(QuranPage.id.asc())
         ).all()
-        
+
         if pages_in_surah and 1 <= kaca <= len(pages_in_surah):
             mapping = pages_in_surah[kaca - 1]
 
@@ -316,14 +358,14 @@ def get_password_hash(password: str) -> str:
 def clean_repeated_voice_text(text: str) -> str:
     if not text:
         return ""
-    
+
     words = text.strip().split()
     dedup_words = []
     for w in words:
         if not dedup_words or dedup_words[-1].lower() != w.lower():
             dedup_words.append(w)
     text = " ".join(dedup_words)
-    
+
     sentences = re.split(r'[,.\n]+', text)
     cleaned_sentences = []
     seen = set()
@@ -340,18 +382,8 @@ def clean_repeated_voice_text(text: str) -> str:
         if not is_duplicate:
             seen.add(s_lower)
             cleaned_sentences.append(s_clean)
-            
+
     text = ". ".join(cleaned_sentences)
-    
-    words = text.split()
-    n = len(words)
-    if n > 4:
-        mid = n // 2
-        first_half = " ".join(words[:mid]).lower()
-        second_half = " ".join(words[mid:]).lower()
-        if fuzz.ratio(first_half, second_half) > 75:
-            text = " ".join(words[:mid])
-            
     return text
 
 # ==========================================
@@ -367,11 +399,11 @@ def get_all_santri(
     username = get_session_username(request, session_user)
     if not username:
         raise HTTPException(status_code=401, detail="Belum login / Session expired!")
-    
+
     user = session.exec(select(User).where(User.username == username)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User session tidak valid!")
-    
+
     santri_list = []
     nama_ustadz = getattr(user, "nama_lengkap", user.username)
 
@@ -381,7 +413,7 @@ def get_all_santri(
         kelompok = session.exec(select(KelompokHalaqah).where(KelompokHalaqah.musyrif_id == user.id)).first()
         if not kelompok:
             return {"status": "success", "nama_ustadz": nama_ustadz, "data": [], "santri": []}
-            
+
         santri_list = session.exec(select(Santri).where(Santri.kelompok_id == kelompok.id)).all()
     else:
         raise HTTPException(status_code=403, detail="Role tidak diizinkan!")
@@ -405,11 +437,11 @@ def get_all_santri(
     }
 
 # ==========================================
-# 2. VOICE PARSING COMMAND (ULTRA STRICT AI)
+# 2. VOICE PARSING COMMAND (DENGAN STRUKTUR LIST PERMANEN)
 # ==========================================
 @router.post("/parse-voice")
 async def parse_voice_command(
-    data: VoiceParseRequest, 
+    data: VoiceParseRequest,
     session: Session = Depends(get_session)
 ):
     raw_command_text = data.get_text()
@@ -418,26 +450,12 @@ async def parse_voice_command(
     if not command_text.strip():
         raise HTTPException(status_code=422, detail="Teks transkrip suara kosong!")
 
-    # SYSTEM PROMPT YANG DIPERKETAT SEMAKSIMAL MUNGKIN
     system_prompt = """
 [SYSTEM PROTOCOL: ZERO-TOLERANCE STRICT JSON PARSER]
-Anda adalah mesin ekstraksi data mutabaah Al-Quran otomatis yang sangat kaku, presisi, dan deterministik. 
-Tugas mutlak Anda adalah mengekstrak transkrip suara musyrif ke dalam format JSON murni tanpa ada teks tambahan di luar JSON.
+Anda adalah mesin ekstraksi data mutabaah Al-Quran otomatis. Ekstrak transkrip suara musyrif ke dalam format JSON murni.
 
-ATURAN KETAT:
-1. JANGAN menambahkan markdown, catatan kaki, salam, atau penjelasan naratif di luar blok JSON. Output harus 100% parseable oleh `json.loads()`.
-2. Ekstraksi field berikut dengan akurasi mutlak:
-   - "juz": integer atau null jika tidak disebut.
-   - "kaca": integer nomor halaman mushaf (jika disebut) atau null.
-   - "bagian": string persis "a", "b", atau null.
-   - "surah_langsung": string nama surah asli dari transkrip atau null.
-   - "ayat_langsung": string rentang ayat (contoh: "1-10", "5") atau "-".
-   - "status_kelancaran": WAJIB bernilai salah satu dari: "lancar", "tersendat", "gagal".
-   - "jumlah_tersendat": integer (hitung akumulasi kata salah/ulang/tersendat).
-   - "jumlah_teguran": integer (hitung akumulasi teguran tajwid/makhraj).
-   - "catatan_musyrif": ringkasan profesional narasi musyrif dalam Bahasa Indonesia.
-   - "tajwid_details": Array of object [{ "rule": "...", "error_description": "...", "count": int }]
-   - "makhraj_details": Array of object [{ "letter": "...", "error_description": "...", "count": int }]
+ATURAN KETAT KELANCARAN (7 Kategori Penilaian):
+Field `status_kelancaran` HANYA BOLEH diisi: "sempurna", "tegur_ringan", "bantuan_talqin", "lupa_berulang", "blok_total", "idhthirab", "gagal_total".
 
 FORMAT JSON WAJIB:
 {
@@ -446,12 +464,10 @@ FORMAT JSON WAJIB:
     "bagian": null,
     "surah_langsung": null,
     "ayat_langsung": "-",
-    "status_kelancaran": "lancar",
-    "jumlah_tersendat": 0,
-    "jumlah_teguran": 0,
-    "catatan_musyrif": "",
-    "tajwid_details": [],
-    "makhraj_details": []
+    "status_kelancaran": "sempurna",
+    "tajwid_details": [{"rule": "Qalqalah", "error_description": "kurang mantul", "count": 1}],
+    "makhraj_details": [{"letter": "Fa", "error_description": "kurang pas", "count": 1}],
+    "catatan_tambahan": ""
 }
 """
 
@@ -474,62 +490,46 @@ FORMAT JSON WAJIB:
         if OPENROUTER_API_KEY:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-                
+
                 if resp.status_code == 200:
                     res_json = resp.json()
                     content = res_json['choices'][0]['message']['content'] if 'choices' in res_json and res_json['choices'] else ""
-                    
+
                     content_clean = content.strip()
                     if content_clean.startswith("```json"): content_clean = content_clean[7:]
                     if content_clean.startswith("```"): content_clean = content_clean[3:]
                     if content_clean.endswith("```"): content_clean = content_clean[:-3]
-                    
-                    raw_parsed = json.loads(content_clean.strip())
 
-                    if isinstance(raw_parsed, list):
-                        raw_parsed = raw_parsed[0] if len(raw_parsed) > 0 else {}
-                    elif not isinstance(raw_parsed, dict):
+                    raw_parsed = json.loads(content_clean.strip())
+                    if not isinstance(raw_parsed, dict):
                         raw_parsed = {}
-                        
+
                     raw_surah = raw_parsed.get("surah_langsung")
                     raw_kaca = raw_parsed.get("kaca")
                     raw_juz = raw_parsed.get("juz")
                     raw_ayat = raw_parsed.get("ayat_langsung")
-                        
-                    ai_kelancaran = str(raw_parsed.get("status_kelancaran", "lancar")).lower()
-                    
-                    try:
-                        jumlah_tersendat = int(raw_parsed.get("jumlah_tersendat", 0))
-                    except (ValueError, TypeError):
-                        jumlah_tersendat = 0
 
-                    try:
-                        jumlah_teguran = int(raw_parsed.get("jumlah_teguran", 0))
-                    except (ValueError, TypeError):
-                        jumlah_teguran = 0
+                    ai_kelancaran = str(raw_parsed.get("status_kelancaran", "sempurna")).lower()
+                    final_kelancaran = normalize_status_kelancaran(ai_kelancaran, "")
 
-                    catatan_eks = str(raw_parsed.get("catatan_musyrif", ""))
+                    tajwid_dets = raw_parsed.get("tajwid_details", [])
+                    makhraj_dets = raw_parsed.get("makhraj_details", [])
 
-                    final_kelancaran = normalize_status_kelancaran(
-                        status=ai_kelancaran, 
-                        catatan=catatan_eks, 
-                        jumlah_tersendat=jumlah_tersendat, 
-                        jumlah_teguran=jumlah_teguran
+                    tajwid_texts = [f"{t.get('rule', '')} ({t.get('error_description', '')})" for t in tajwid_dets]
+                    makhraj_texts = [f"{m.get('letter', '')} ({m.get('error_description', '')})" for m in makhraj_dets]
+                    combined_tajwid = ", ".join(tajwid_texts + makhraj_texts) if (tajwid_texts or makhraj_texts) else "Baik dan sesuai kaidah"
+
+                    structured_catatan = (
+                        f"- Kualitas Hafalan: {final_kelancaran}\n"
+                        f"- Kualitas Tajwid: {combined_tajwid}"
                     )
+                    if raw_parsed.get("catatan_tambahan"):
+                        structured_catatan += f"\n- Catatan Lainnya: {raw_parsed.get('catatan_tambahan')}"
 
                     bagian_val = str(raw_parsed.get("bagian")).lower() if raw_parsed.get("bagian") else None
-                    
-                    kaca_clean = None
-                    if raw_kaca is not None:
-                        match = re.search(r'(\d+)', str(raw_kaca))
-                        if match:
-                            kaca_clean = int(match.group(1))
 
-                    juz_clean = None
-                    if raw_juz is not None:
-                        match = re.search(r'(\d+)', str(raw_juz))
-                        if match:
-                            juz_clean = int(match.group(1))
+                    kaca_clean = int(re.search(r'(\d+)', str(raw_kaca)).group(1)) if raw_kaca and re.search(r'(\d+)', str(raw_kaca)) else None
+                    juz_clean = int(re.search(r'(\d+)', str(raw_juz)).group(1)) if raw_juz and re.search(r'(\d+)', str(raw_juz)) else None
 
                     surah_info = None
                     surah_id_found = None
@@ -552,13 +552,13 @@ FORMAT JSON WAJIB:
                             bagian=bagian_val,
                             surah_id=surah_id_found
                         )
-
                         if db_mapping.get("surah_id"):
                             surah_info = {
                                 "surah_id": db_mapping["surah_id"],
                                 "surah": db_mapping["surah_sahih"],
                                 "ayat": db_mapping["ayat_standar"]
                             }
+
                     if not surah_info or not surah_info.get("surah_id"):
                         fallback_match = find_best_surah_match(command_text, cutoff_score=60.0)
                         if fallback_match:
@@ -568,43 +568,42 @@ FORMAT JSON WAJIB:
                                 "ayat": raw_ayat or "-"
                             }
                         else:
-                            surah_info = surah_info or {"surah_id": None, "surah": "-", "ayat": "-"}
+                            surah_info = {"surah_id": None, "surah": "-", "ayat": "-"}
+
+                    enhanced_rubric_results = []
+                    for t_item in tajwid_dets:
+                        enriched = enrich_tajwid_with_database_rubric(session, t_item.get("rule", ""))
+                        if enriched:
+                            enhanced_rubric_results.extend(enriched)
 
                     final_draft = {
                         "surah": surah_info.get("surah"),
                         "ayat": surah_info.get("ayat"),
                         "status_kelancaran": final_kelancaran,
-                        "jumlah_tersendat": jumlah_tersendat,
-                        "jumlah_teguran": jumlah_teguran,
-                        "catatan_musyrif": raw_parsed.get("catatan_musyrif") or "",
-                        "kata_bermasalah": raw_parsed.get("kata_bermasalah", []),
-                        "catatan_waqaf_ibtida": raw_parsed.get("catatan_waqaf_ibtida"),
-                        "saran_perbaikan": raw_parsed.get("saran_perbaikan"),
-                        "tajwid_details": raw_parsed.get("tajwid_details", []),
-                        "makhraj_details": raw_parsed.get("makhraj_details", [])
+                        "catatan_musyrif": structured_catatan,
+                        "tajwid_details": tajwid_dets,
+                        "makhraj_details": makhraj_dets,
+                        "rincian_rubrik_database": enhanced_rubric_results
                     }
-                    
+
                     return {"status": "success", "mode": "combined", "draft": final_draft}
-                
+
     except Exception as e:
         print(f"❌ VOICE PARSE ERROR: {e}")
 
     fallback_surah = find_best_surah_match(command_text, cutoff_score=60.0)
+    default_catatan = f"- Kualitas Hafalan: sempurna\n- Kualitas Tajwid: {command_text}"
     return {
         "status": "error_fallback",
         "message": "AI Parser error/fallback",
         "draft": {
             "surah": fallback_surah["surah_sahih"] if fallback_surah else "-",
             "ayat": "-",
-            "status_kelancaran": "tersendat",
-            "jumlah_tersendat": 1,
-            "jumlah_teguran": 0,
-            "catatan_musyrif": command_text,
-            "kata_bermasalah": [],
-            "catatan_waqaf_ibtida": None,
-            "saran_perbaikan": None,
+            "status_kelancaran": "sempurna",
+            "catatan_musyrif": default_catatan,
             "tajwid_details": [],
-            "makhraj_details": []
+            "makhraj_details": [],
+            "rincian_rubrik_database": enrich_tajwid_with_database_rubric(session, command_text)
         }
     }
 
@@ -616,7 +615,7 @@ async def input_setoran(
     request: Request,
     data: SetoranCreate,
     session: Session = Depends(get_session),
-    session_user: Optional[str] = Cookie(None) 
+    session_user: Optional[str] = Cookie(None)
 ):
     try:
         username = get_session_username(request, session_user)
@@ -629,51 +628,36 @@ async def input_setoran(
 
         user = session.exec(select(User).where(User.username == username)).first()
         santri = session.exec(select(Santri).where(Santri.id == target_santri_id)).first()
-        
+
         if not user or not santri:
             raise HTTPException(status_code=404, detail="User atau Santri tidak ditemukan")
 
         if santri.status_santri != "hadir":
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Tidak dapat menginput setoran! Santri berstatus '{santri.status_santri}'."
             )
 
         final_surah = data.surah_sahih or data.surah or "Surah Tidak Terdefinisi"
         final_ayat = data.ayat_standar or data.ayat or "-"
-        now_wib = now_indonesia()
+
+        db_rubric_matches = []
+        if data.catatan_musyrif:
+            for line in data.catatan_musyrif.split("\n"):
+                if line.strip():
+                    matched_db = enrich_tajwid_with_database_rubric(session, line)
+                    if matched_db:
+                        db_rubric_matches.extend(matched_db)
 
         detail_payload_dict = {
             "tajwid_details": [item.model_dump() for item in data.tajwid_details],
-            "makhraj_details": [item.model_dump() for item in data.makhraj_details]
+            "makhraj_details": [item.model_dump() for item in data.makhraj_details],
+            "rubrik_tajwid_referensi": db_rubric_matches
         }
-
-        jumlah_tersendat = data.jumlah_tersendat
-        jumlah_teguran = data.jumlah_teguran
-
-        if jumlah_tersendat == 0 and data.tajwid_details:
-            jumlah_tersendat = sum(item.count for item in data.tajwid_details)
-        if jumlah_teguran == 0 and data.makhraj_details:
-            jumlah_teguran = sum(item.count for item in data.makhraj_details)
-
-        if (jumlah_tersendat == 0 or jumlah_teguran == 0) and data.catatan_musyrif:
-            catatan_lower = data.catatan_musyrif.lower()
-            
-            if jumlah_tersendat == 0:
-                if "banyak" in catatan_lower or "ulang" in catatan_lower:
-                    jumlah_tersendat = 8
-                elif "salah" in catatan_lower or "tersendat" in catatan_lower:
-                    jumlah_tersendat = 3
-
-            if jumlah_teguran == 0:
-                if "makhraj" in catatan_lower or "huruf" in catatan_lower or "qalqalah" in catatan_lower:
-                    jumlah_teguran = 2
 
         final_status_kelancaran = normalize_status_kelancaran(
             status=data.status_kelancaran,
-            catatan=data.catatan_musyrif,
-            jumlah_tersendat=jumlah_tersendat,
-            jumlah_teguran=jumlah_teguran
+            catatan=data.catatan_musyrif
         )
 
         new_setoran = SetoranTahfizh(
@@ -682,17 +666,15 @@ async def input_setoran(
             ayat=final_ayat,
             status_kelancaran=final_status_kelancaran,
             catatan_musyrif=data.catatan_musyrif or "",
-            jumlah_tersendat=jumlah_tersendat,
-            jumlah_teguran=jumlah_teguran,
-            ai_rekomendasi=f"Input terverifikasi. Tanggal: {now_wib.strftime('%d-%m-%Y %H:%M WIB')}"
+            ai_rekomendasi=f"Input terverifikasi dengan Standar 7 Kategori Hafalan."
         )
         session.add(new_setoran)
         session.commit()
         session.refresh(new_setoran)
 
         return {
-            "status": "success", 
-            "message": "Setoran berhasil dicatat!", 
+            "status": "success",
+            "message": "Setoran berhasil dicatat!",
             "data": new_setoran,
             "rincian_evaluasi": detail_payload_dict
         }
@@ -708,8 +690,8 @@ async def input_setoran(
 # ==========================================
 @router.put("/santri/{santri_id}/target-harian")
 def set_target_harian(
-    santri_id: int, 
-    payload: TargetMusyrifPayload, 
+    santri_id: int,
+    payload: TargetMusyrifPayload,
     session: Session = Depends(get_session)
 ):
     santri = session.get(Santri, santri_id)
@@ -720,9 +702,9 @@ def set_target_harian(
     session.add(santri)
     session.commit()
     session.refresh(santri)
-    
+
     return {
-        "status": "success", 
+        "status": "success",
         "message": f"Target harian untuk {santri.nama_santri} berhasil diperbarui!",
         "target_harian": santri.target_harian
     }
@@ -730,8 +712,8 @@ def set_target_harian(
 
 @router.put("/santri/{santri_id}/status")
 def update_status_santri(
-    santri_id: int, 
-    payload: UpdateStatusPayload, 
+    santri_id: int,
+    payload: UpdateStatusPayload,
     session: Session = Depends(get_session)
 ):
     status_valid = ["hadir", "izin", "persiapan_ujian", "remed_ujian"]
@@ -746,18 +728,18 @@ def update_status_santri(
     if payload.status == "izin":
         santri.keterangan_izin = payload.keterangan or "Izin/Sakit"
     elif payload.status == "hadir":
-        santri.keterangan_izin = None 
+        santri.keterangan_izin = None
 
     log = StatusSantriLog(
         santri_id=santri.id,
         status=payload.status,
         keterangan=payload.keterangan
     )
-    
+
     session.add(santri)
     session.add(log)
     session.commit()
-    
+
     return {
         "status": "success",
         "message": f"Status {santri.nama_santri} berhasil diubah menjadi '{payload.status}'",
@@ -770,8 +752,8 @@ def update_status_santri(
 
 @router.post("/santri/{santri_id}/daftar-ujian")
 def daftarkan_ujian_santri(
-    santri_id: int, 
-    payload: DaftarUjianPayload, 
+    santri_id: int,
+    payload: DaftarUjianPayload,
     session: Session = Depends(get_session)
 ):
     santri = session.get(Santri, santri_id)
@@ -801,8 +783,8 @@ def daftarkan_ujian_santri(
 
 @router.post("/santri/{santri_id}/hasil-ujian")
 def submit_hasil_ujian(
-    santri_id: int, 
-    payload: HasilUjianPayload, 
+    santri_id: int,
+    payload: HasilUjianPayload,
     request: Request,
     session: Session = Depends(get_session),
     session_user: Optional[str] = Cookie(None)
@@ -837,7 +819,7 @@ def submit_hasil_ujian(
         status=santri.status_santri,
         keterangan=catatan_teks
     )
-    
+
     session.add(santri)
     session.add(log_status)
     session.commit()
@@ -874,13 +856,9 @@ def get_statistik_setoran_santri(santri_id: int, session: Session = Depends(get_
                 "surah": s.surah,
                 "ayat": s.ayat,
                 "status": normalize_status_kelancaran(
-                    s.status_kelancaran, 
-                    getattr(s, "catatan_musyrif", ""), 
-                    getattr(s, "jumlah_tersendat", 0), 
-                    getattr(s, "jumlah_teguran", 0)
+                    s.status_kelancaran,
+                    getattr(s, "catatan_musyrif", "")
                 ),
-                "jumlah_tersendat": getattr(s, "jumlah_tersendat", 0),
-                "jumlah_teguran": getattr(s, "jumlah_teguran", 0),
                 "catatan": getattr(s, "catatan_musyrif", ""),
                 "waktu": format_indonesia(getattr(s, "created_at", None))
             } for s in setoran_list
@@ -888,12 +866,12 @@ def get_statistik_setoran_santri(santri_id: int, session: Session = Depends(get_
     }
 
 # ==========================================
-# 6. ANALISA AI HARIAN SANTRI 
+# 6. ANALISA AI HARIAN SANTRI (DENGAN PEMETAAN TAJWID)
 # ==========================================
 @router.post("/ai/rangkuman-harian/{santri_id}")
 async def generate_rangkuman_harian(
-    santri_id: int, 
-    req: RangkumanHarianRequest, 
+    santri_id: int,
+    req: RangkumanHarianRequest,
     session: Session = Depends(get_session)
 ):
     santri = session.get(Santri, santri_id)
@@ -901,17 +879,13 @@ async def generate_rangkuman_harian(
         raise HTTPException(status_code=404, detail="Santri tidak ditemukan")
 
     try:
-        if req.tanggal:
-            target_date = datetime.strptime(req.tanggal, "%Y-%m-%d").date()
-        else:
-            target_date = now_indonesia().date()
+        target_date = datetime.strptime(req.tanggal, "%Y-%m-%d").date() if req.tanggal else now_indonesia().date()
     except ValueError:
         raise HTTPException(status_code=400, detail="Format tanggal tidak valid! Gunakan format YYYY-MM-DD.")
 
     start_of_day = datetime.combine(target_date, time.min)
     end_of_day = datetime.combine(target_date, time.max)
 
-    # Ambil seluruh setoran santri pada tanggal tersebut
     setoran_today = session.exec(
         select(SetoranTahfizh)
         .where(SetoranTahfizh.santri_id == santri_id)
@@ -927,44 +901,31 @@ async def generate_rangkuman_harian(
         .order_by(StatusSantriLog.id.desc())
     ).first()
 
-    status_absensi = santri.status_santri
-    keterangan_absensi = santri.keterangan_izin or "Hadir di halaqah"
-    if status_log_today:
-        status_absensi = status_log_today.status
-        if status_log_today.keterangan:
-            keterangan_absensi = status_log_today.keterangan
-
-    # Akumulasi metrik dari semua setoran hari ini
+    status_absensi = status_log_today.status if status_log_today else santri.status_santri
     total_setoran = len(setoran_today)
-    total_tersendat = sum(getattr(s, 'jumlah_tersendat', 0) for s in setoran_today)
-    total_teguran = sum(getattr(s, 'jumlah_teguran', 0) for s in setoran_today)
+    kategori_counts = {k: 0 for k in ["sempurna", "tegur_ringan", "bantuan_talqin", "lupa_berulang", "blok_total", "idhthirab", "gagal_total"]}
 
-    catatan_setoran_teks = "\n".join([
-        f"- Surah {s.surah}:{s.ayat} | Status: {s.status_kelancaran} | Tersendat: {getattr(s, 'jumlah_tersendat', 0)} | Teguran: {getattr(s, 'jumlah_teguran', 0)} | Catatan Musyrif: {s.catatan_musyrif or 'Tidak ada'}"
-        for s in setoran_today
-    ]) if setoran_today else "Belum/Tidak ada setoran hafalan hari ini."
+    catatan_setoran_teks_list = []
+    for s in setoran_today:
+        st_norm = normalize_status_kelancaran(s.status_kelancaran, getattr(s, 'catatan_musyrif', ''))
+        if st_norm in kategori_counts:
+            kategori_counts[st_norm] += 1
+        catatan_setoran_teks_list.append(f"- Surah {s.surah}:{s.ayat} | Kategori: {st_norm} | Catatan: {s.catatan_musyrif or '-'}")
 
-    target_harian = getattr(santri, 'target_harian', 'Belum diset')
+    catatan_setoran_teks = "\n".join(catatan_setoran_teks_list) if setoran_today else "Tidak ada setoran hafalan hari ini."
 
-    # SYSTEM PROMPT YANG DIPERKETAT UNTUK AKUMULASI
     system_prompt = """
 [SYSTEM PROTOCOL: ZERO-TOLERANCE STRICT JSON EVALUATOR]
-Anda adalah AI Evaluator Tahfizh Harian yang kaku, profesional, dan taat aturan skema JSON.
-Tugas Anda menganalisis akumulasi seluruh data setoran santri hari ini dan mengembalikan respons HANYA berupa objek JSON valid tanpa teks pembuka, penutup, atau markdown backticks.
+Anda adalah AI Evaluator Tahfizh Harian. Berikan evaluasi JSON murni yang mencakup kualitas hafalan dan kualitas tajwid santri hari ini berdasarkan data riwayat.
 
-ATURAN MUTLAK BAHASA & KONTEKS:
-1. Gunakan HANYA istilah yang berkaitan dengan Al-Qur'an, Tajwid, dan Tahfizh (contoh: makhraj huruf, tajwid, mad, qalqalah, kelancaran).
-2. DILARANG KERAS menggunakan kata-kata atau istilah yang melenceng jauh dari konteks pesantren/tahfizh (seperti kata "pernikahan" atau istilah ngaco lainnya). Jika catatan musyrif memiliki typo atau ambigu, fokuskan analisis pada metrik angka (jumlah tersendat dan teguran) serta hukum tajwid yang valid.
-3. Gunakan bahasa Indonesia yang formal, objektif, dan konstruktif.
-
-ATURAN KETAT STRUKTUR JSON:
+FORMAT JSON WAJIB:
 {
-  "kualitas_hafalan": "lancar" | "tersendat" | "ulang",
-  "kualitas_tajwid": ["Nama Hukum Tajwid 1", "Nama Hukum Tajwid 2"],
-  "absensi": "Hadir / Izin / Sakit / Alfa",
-  "konsistensi_halaqoh": "Penilaian singkat kehadiran & keaktifan (maksimal 10 kata)",
-  "konsistensi_setoran": "Penilaian singkat pencapaian target berdasarkan akumulasi setoran hari ini (maksimal 10 kata)",
-  "rangkuman_teks": "Narasi ringkas objektif 2-3 kalimat mengenai akumulasi hafalan dan evaluasi hari ini."
+    "kualitas_hafalan": "sempurna",
+    "kualitas_tajwid": ["Qalqalah pada surah X perlu ditingkatkan", "Makhraj huruf hijaiyah sudah baik"],
+    "absensi": "hadir",
+    "konsistensi_halaqoh": "Hadir",
+    "konsistensi_setoran": "Aktif",
+    "rangkuman_teks": "Ringkasan harian santri..."
 }
 """
 
@@ -973,19 +934,20 @@ ATURAN KETAT STRUKTUR JSON:
         "model": OPENROUTER_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Nama: {santri.nama_santri}\nTanggal: {target_date}\nAbsensi: {status_absensi} ({keterangan_absensi})\nTarget Harian: {target_harian}\nTotal Sesi Setoran Hari Ini: {total_setoran}\nAkumulasi Total Tersendat: {total_tersendat}\nAkumulasi Total Teguran: {total_teguran}\nDetail Riwayat Setoran Hari Ini:\n{catatan_setoran_teks}"}
+            {"role": "user", "content": f"Nama: {santri.nama_santri}\nTanggal: {target_date}\nAbsensi: {status_absensi}\nRiwayat Setoran & Catatan:\n{catatan_setoran_teks}"}
         ],
         "temperature": 0.0,
         "response_format": {"type": "json_object"}
     }
 
+    dominant_category = max(kategori_counts, key=kategori_counts.get) if total_setoran > 0 else "sempurna"
     evaluasi_json = {
-        "kualitas_hafalan": "lancar",
-        "kualitas_tajwid": [],
+        "kualitas_hafalan": dominant_category,
+        "kualitas_tajwid": ["Konsistensi bacaan tajwid secara umum sudah baik."],
         "absensi": status_absensi,
         "konsistensi_halaqoh": "Hadir",
-        "konsistensy_setoran": "Belum ada setoran",
-        "rangkuman_teks": "Hari ini tidak ada aktivitas setoran hafalan yang tercatat."
+        "konsistensi_setoran": f"{total_setoran} setoran tercatat",
+        "rangkuman_teks": f"Hari ini santri melakukan {total_setoran} sesi setoran dengan dominasi kategori '{dominant_category}'."
     }
 
     try:
@@ -998,7 +960,12 @@ ATURAN KETAT STRUKTUR JSON:
                     if content.startswith("```json"): content = content[7:]
                     if content.startswith("```"): content = content[3:]
                     if content.endswith("```"): content = content[:-3]
-                    evaluasi_json = json.loads(content.strip())
+                    parsed_ai = json.loads(content.strip())
+                    ai_quality = str(parsed_ai.get("kualitas_hafalan", dominant_category)).lower().strip()
+                    parsed_ai["kualitas_hafalan"] = normalize_status_kelancaran(ai_quality, "")
+                    if "kualitas_tajwid" not in parsed_ai or not parsed_ai["kualitas_tajwid"]:
+                        parsed_ai["kualitas_tajwid"] = ["Perhatikan ketepatan makhraj dan hukum tajwid."]
+                    evaluasi_json = parsed_ai
     except Exception as e:
         print(f"❌ Error AI Rangkuman: {e}")
 
@@ -1007,14 +974,12 @@ ATURAN KETAT STRUKTUR JSON:
         "tanggal": target_date.strftime("%Y-%m-%d"),
         "santri_id": santri_id,
         "total_setoran_hari_ini": total_setoran,
-        "akumulasi_tersendat": total_tersendat,
-        "akumulasi_teguran": total_teguran,
-        "rangkuman_ai": evaluasi_json.get("rangkuman_teks", ""),
-        "penilaian_harian_ai": evaluasi_json 
+        "statistik_7_kategori": kategori_counts,
+        "penilaian_harian_ai": evaluasi_json
     }
 
 # ==========================================
-# 7. RAPORT SANTRI & COPILOT AI RAPORT
+# 7. RAPORT SANTRI & COPILOT AI RAPORT (UPDATED)
 # ==========================================
 @router.post("/raport/preview-ai")
 async def preview_ai_raport_copilot(
@@ -1025,32 +990,82 @@ async def preview_ai_raport_copilot(
     if not santri:
         raise HTTPException(status_code=404, detail="Santri tidak ditemukan!")
 
-    prompt_copilot = "Anda adalah AI Evaluator Raport Tahfizh yang profesional, solutif, berbasis data objektif, dan langsung pada poin esensial tanpa basa-basi."
+    # Ambil riwayat setoran untuk dianalisis oleh AI
+    riwayat_setoran = session.exec(
+        select(SetoranTahfizh)
+        .where(SetoranTahfizh.santri_id == data.santri_id)
+        .order_by(SetoranTahfizh.created_at.desc())
+        .limit(15)
+    ).all()
+
+    ringkasan_performa = "\n".join([
+        f"- Surah {s.surah}, Ayat {s.ayat}: Kategori={s.status_kelancaran} | Catatan={s.catatan_musyrif}"
+        for s in riwayat_setoran
+    ]) if riwayat_setoran else "Belum ada riwayat setoran tercatat pada periode ini."
+
+    system_prompt = """
+[SYSTEM PROTOCOL: PROFESSIONAL TAHFIZH REPORT CARD AI]
+Anda adalah AI Copilot Raport Tahfizh profesional. Tugas Anda adalah menyusun Laporan Hasil Belajar (Raport) Semesteran Tahfizh Al-Quran yang komprehensif, mendalam, dan santun.
+Analisis data setoran santri berdasarkan 7 Kategori Kualitas Hafalan Objektif (1. Kelancaran/Hifzh, 2. Ketepatan Makhraj, 3. Penerapan Kaidah Tajwid, 4. Fashahah & Kejelasan Suara, 5. Konsistensi Tempo, 6. Pengelolaan Waqaf & Ibtida', 7. Adab/Kestabilan Bacaan).
+
+OUTPUT WAJIB DALAM FORMAT JSON MURNI DENGAN 3 KUNCI UTAMA:
+{
+    "evaluasi_musyrif": "Analisis mendalam mengenai perkembangan hafalan, kekuatan, dan area perbaikan santri selama semester ini untuk catatan lembaga/musyrif.",
+    "rekomendasi_ortu": "Panduan dan langkah-langkah praktis yang bisa dilakukan orang tua di rumah untuk mendampingi muroja'ah serta memotivasi anak.",
+    "pesan_anak": "Pesan motivasi yang hangat, membimbing, dan personal langsung untuk sang santri agar semakin semangat dan cinta Al-Quran."
+}
+"""
+
+    user_prompt = (
+        f"Data Santri:\n"
+        f"- Nama: {santri.nama_santri}\n"
+        f"- Semester: {data.semester}\n"
+        f"- Nilai Harian: {data.nilai_harian}\n"
+        f"- Nilai Bulanan: {data.nilai_bulanan}\n"
+        f"- Nilai Akhir: {data.nilai_akhir}\n"
+        f"- Catatan Musyrif: {data.catatan_musyrif or '-'}\n\n"
+        f"Riwayat Setoran & Evaluasi Terakhir:\n{ringkasan_performa}"
+    )
 
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [
-            {"role": "system", "content": prompt_copilot},
-            {"role": "user", "content": f"Buatkan rangkuman evaluasi raport untuk santri ID {data.santri_id}"}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.1
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"}
     }
 
-    rekomendasi_generated = "Gagal memproses rekomendasi AI."
+    result_data = {
+
+        "evaluasi_musyrif": data.catatan_musyrif or "Performa hafalan stabil dan menunjukkan kemajuan positif.",
+        "rekomendasi_ortu": "Dampingi anak melakukan muroja'ah hafalan secara rutin setiap selesai shalat fardhu di rumah.",
+        "pesan_anak": "Barakallahu fiik! Pertahankan semangat menghafal Al-Quran, tingkatkan ketelitian tajwid, dan jadilah teladan yang baik."
+    }
+
     try:
         if OPENROUTER_API_KEY:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
                 if resp.status_code == 200:
-                    rekomendasi_generated = resp.json()['choices'][0]['message']['content'].strip()
+                    res_json = resp.json()
+                    content = res_json['choices'][0]['message']['content'].strip()
+                    if content.startswith("```json"): content = content[7:]
+                    if content.startswith("```"): content = content[3:]
+                    if content.endswith("```"): content = content[:-3]
+                    parsed_json = json.loads(content.strip())
+                    if isinstance(parsed_json, dict):
+                        result_data.update(parsed_json)
     except Exception as e:
-        rekomendasi_generated = f"Terjadi kesalahan koneksi AI: {e}"
+        print(f"❌ Error AI Raport Preview: {e}")
 
     return {
         "status": "success",
         "santri_id": data.santri_id,
-        "rekomendasi_ai": rekomendasi_generated
+        "semester": data.semester,
+        "preview_raport_ai": result_data
     }
 
 
@@ -1060,7 +1075,7 @@ async def submit_nilai_raport(data: RaportCreate, session: Session = Depends(get
     if not santri:
         raise HTTPException(status_code=404, detail="Santri tidak ditemukan")
 
-    final_rekomendasi_ai = data.rekomendasi_ai or "Analisa AI tersimpan."
+    final_rekomendasi_ai = data.rekomendasi_ai or "Analisa dan rekomendasi raport tersimpan."
 
     existing_raport = session.exec(
         select(RaportSantri)
@@ -1074,11 +1089,11 @@ async def submit_nilai_raport(data: RaportCreate, session: Session = Depends(get
         existing_raport.nilai_akhir = data.nilai_akhir
         existing_raport.catatan_musyrif = data.catatan_musyrif
         existing_raport.rekomendasi_ai = final_rekomendasi_ai
-        
+
         session.add(existing_raport)
         session.commit()
         session.refresh(existing_raport)
-        return {"status": "success", "message": "Nilai Raport berhasil diperbarui!", "data": existing_raport}
+        return {"status": "success", "message": "Nilai Raport beserta rekomendasi berhasil diperbarui!", "data": existing_raport}
 
     new_raport = RaportSantri(
         santri_id=data.santri_id,
@@ -1093,7 +1108,7 @@ async def submit_nilai_raport(data: RaportCreate, session: Session = Depends(get
     session.commit()
     session.refresh(new_raport)
 
-    return {"status": "success", "message": "Nilai Raport berhasil disimpan!", "data": new_raport}
+    return {"status": "success", "message": "Nilai Raport beserta rekomendasi berhasil disimpan!", "data": new_raport}
 
 
 @router.get("/raport/{santri_id}")
@@ -1161,13 +1176,9 @@ def get_profile_santri(santri_id: int, session: Session = Depends(get_session)):
                 "surah": s.surah,
                 "ayat": s.ayat,
                 "status_kelancaran": normalize_status_kelancaran(
-                    s.status_kelancaran, 
-                    getattr(s, 'catatan_musyrif', ''), 
-                    getattr(s, 'jumlah_tersendat', 0), 
-                    getattr(s, 'jumlah_teguran', 0)
+                    s.status_kelancaran,
+                    getattr(s, 'catatan_musyrif', '')
                 ),
-                "jumlah_tersendat": getattr(s, 'jumlah_tersendat', 0),
-                "jumlah_teguran": getattr(s, 'jumlah_teguran', 0),
                 "catatan_musyrif": getattr(s, 'catatan_musyrif', ''),
                 "waktu_setoran": format_indonesia(getattr(s, 'created_at', None))
             } for s in setoran_list

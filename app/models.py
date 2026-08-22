@@ -10,7 +10,7 @@ from app.timezone import now_indonesia
 class QuranVerse(SQLModel, table=True):
     __tablename__ = "quran_verses"
     __table_args__ = {"extend_existing": True}
-    
+
     id: Optional[int] = Field(default=None, primary_key=True)
     surah_id: int = Field(index=True)          # 1 - 114
     surah_name: str                            # Al-Baqarah, dll
@@ -28,7 +28,7 @@ class QuranVerse(SQLModel, table=True):
 class User(SQLModel, table=True):
     __tablename__ = "users"
     __table_args__ = {"extend_existing": True}
-    
+
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True, nullable=False)
     password_hash: str = Field(nullable=False)
@@ -46,7 +46,7 @@ class User(SQLModel, table=True):
 class KelompokHalaqah(SQLModel, table=True):
     __tablename__ = "kelompok_halaqah"
     __table_args__ = {"extend_existing": True}
-    
+
     id: Optional[int] = Field(default=None, primary_key=True)
     nama_kelompok: str = Field(unique=True, nullable=False) # Contoh: "Halaqah Abu Bakar"
     musyrif_id: Optional[int] = Field(default=None, foreign_key="users.id")
@@ -66,18 +66,18 @@ class Santri(SQLModel, table=True):
     nama_santri: str
     nomor_induk: str
     kelompok_id: Optional[int] = Field(default=None, foreign_key="kelompok_halaqah.id")
-    
+
     # ➕ TAMBAHKAN BARIS RELASI INI:
     kelompok: Optional[KelompokHalaqah] = Relationship(back_populates="santri_list")
-    
+
     # Status & Izin
     status_santri: str = Field(default="hadir") # "hadir", "izin", "persiapan_ujian", "remed_ujian"
     keterangan_izin: Optional[str] = None
-    
+
     # Target
     target_semester: Optional[str] = None        # Diisi oleh Admin (e.g. "Juz 30 Full")
     target_harian: Optional[str] = None          # Diisi oleh Musyrif (e.g. "1 Halaman / Hari")
-    
+
     # Ujian
     tanggal_ujian: Optional[date] = None         # Tanggal pelaksanaan ujian
     catatan_persiapan_ujian: Optional[str] = None # Instruksi persiapan sampai hari H
@@ -111,7 +111,7 @@ class SetoranTahfizh(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     santri_id: int = Field(foreign_key="santri.id", nullable=False)
-    
+
     surah: str = Field(nullable=False)
     ayat: str = Field(nullable=False)
     status_kelancaran: str = Field(nullable=False)
@@ -128,7 +128,7 @@ class SetoranTahfizh(SQLModel, table=True):
 class HalaqahDisruption(SQLModel, table=True):
     __tablename__ = "halaqah_disruptions"
     __table_args__ = {"extend_existing": True}
-    
+
     id: Optional[int] = Field(default=None, primary_key=True)
     tanggal: datetime = Field(default_factory=now_indonesia)
     kelompok_id: int = Field(foreign_key="kelompok_halaqah.id")
@@ -147,12 +147,23 @@ class RaportSantri(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     santri_id: int = Field(foreign_key="santri.id", index=True)
-    semester: str  
-    nilai_harian: float  
-    nilai_bulanan: float 
-    nilai_akhir: float   
+    semester: str
+    nilai_harian: float
+    nilai_bulanan: float
+    nilai_akhir: float
     catatan_musyrif: Optional[str] = ""
     rekomendasi_ai: Optional[str] = Field(default=None)
+
+    # 8 Standar Field Raport Frontend
+    kualitas_hafalan: Optional[str] = Field(default=None)
+    absensi: Optional[str] = Field(default=None)
+    fokus_tajwid: Optional[str] = Field(default=None)
+    performance_konsistensi: Optional[str] = Field(default=None)
+    rekomendasi_ortu: Optional[str] = Field(default=None)
+    rekomendasi_musyrif: Optional[str] = Field(default=None)
+    pesan_motivasi: Optional[str] = Field(default=None)
+    capaian_kelebihan: Optional[str] = Field(default=None)
+
     created_at: datetime = Field(default_factory=now_indonesia)
 
 
@@ -197,4 +208,28 @@ class SurahModel(SQLModel, table=True):
     nama_surah: str = Field(nullable=False)             # Al-Fatihah, dll
     nama_lain: Optional[str] = Field(default=None)      # Ummul Kitab, dll
     typo_asr: Optional[str] = Field(default=None)       # Referensi typo pencarian asr
-    
+
+# ==========================================
+# 12. TABEL TAJWID CATEGORIES
+# ==========================================
+class TajwidRubrik(SQLModel, table=True):
+    __tablename__ = "tajwid_rubrik"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    kategori: str
+    sub_kaidah: str
+    keterangan: str
+    kriteria_penilaian: str
+# ==========================================
+# 13. TABEL TAJWID ASR
+# ==========================================
+class TajwidModel(SQLModel, table=True):
+    __tablename__ = "tajwid"  # Nama tabel di database PostgreSQL
+
+    id_kaidah: int = Field(default=None, primary_key=True)
+    kategori_utama: str
+    sub_kaidah: str
+    keterangan_resmi: str
+    kriteria_penilaian: str
+    nama_lain: str
+    typo_asr: str

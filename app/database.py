@@ -47,7 +47,7 @@ def ensure_runtime_columns():
                 connection.execute(text("ALTER TABLE quran_verses ADD COLUMN juz_number INTEGER DEFAULT 1"))
                 connection.execute(text("CREATE INDEX IF NOT EXISTS ix_quran_verses_juz_number ON quran_verses (juz_number)"))
 
-        # 3. Migration safety check untuk santri foto profil & hasil ujian
+        # 4. Migration safety check untuk santri foto profil & hasil ujian
         if "santri" in existing_tables:
             santri_columns = {column["name"] for column in inspector.get_columns("santri")}
             if "foto_profile" not in santri_columns:
@@ -56,6 +56,23 @@ def ensure_runtime_columns():
                 connection.execute(text("ALTER TABLE santri ADD COLUMN nilai_ujian FLOAT DEFAULT NULL"))
             if "hasil_ujian" not in santri_columns:
                 connection.execute(text("ALTER TABLE santri ADD COLUMN hasil_ujian VARCHAR DEFAULT NULL"))
+
+        # 5. Migration safety check untuk raport_santri (8 field raport standar frontend)
+        if "raport_santri" in existing_tables:
+            raport_columns = {column["name"] for column in inspector.get_columns("raport_santri")}
+            new_raport_columns = [
+                ("kualitas_hafalan", "VARCHAR DEFAULT NULL"),
+                ("absensi", "VARCHAR DEFAULT NULL"),
+                ("fokus_tajwid", "TEXT DEFAULT NULL"),
+                ("performance_konsistensi", "TEXT DEFAULT NULL"),
+                ("rekomendasi_ortu", "TEXT DEFAULT NULL"),
+                ("rekomendasi_musyrif", "TEXT DEFAULT NULL"),
+                ("pesan_motivasi", "TEXT DEFAULT NULL"),
+                ("capaian_kelebihan", "TEXT DEFAULT NULL"),
+            ]
+            for col_name, col_type in new_raport_columns:
+                if col_name not in raport_columns:
+                    connection.execute(text(f"ALTER TABLE raport_santri ADD COLUMN {col_name} {col_type}"))
 
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
